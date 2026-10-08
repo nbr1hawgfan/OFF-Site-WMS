@@ -3,17 +3,21 @@
 Mobile-first warehouse app for RMB Logistics. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.3.0 includes:**
-- **Sign-in** with roles.
+**v0.4.0 includes:**
+- **Sign-in** with roles, including a **lift** role that only sees Dock Mode.
+- **Dock Mode:** big-button Load, Unload, Move, and Lookup screens for the
+  floor.
+- **Office/dock split:** order lines with wrong-pallet blocking, scheduled
+  receipts, and printed load and unload sheets.
 - **Receiving:** receipts, pallets, 4x6 labels, printed receipt.
 - **Shipping:** scan or pick pallets, partial pallets, ship, BOL.
 - **Inventory lookup:** scan or search, move, adjust, hold.
 - **Setup:** items, locations, customers & vendors, company info, pallet
   identifiers.
 
-> **Database:** migrations 001–005 are all applied to Offsite WMS. When a new
-> migration ships, run it in the Supabase SQL Editor **before** publishing the
-> app files that need it.
+> **Upgrading to v0.4:** run `supabase/migrations/006_dock_mode.sql` in the
+> Supabase SQL Editor **before** publishing these files. Migrations 001–005 are
+> already applied. The current v0.3 app keeps working after 006 is run.
 
 **Planned next:** daily load calendar (inbound and outbound).
 
@@ -55,8 +59,9 @@ To deactivate someone: `update app_users set active = false where full_name = '.
 
 | Role | Can |
 |---|---|
-| viewer | Look up inventory, view receipts |
-| operator | + create receipts, receive, move pallets, void pallets on open receipts, close receipts |
+| viewer | Look up inventory, view receipts and shipments |
+| lift | **Dock Mode only:** receive onto open receipts, load pallets onto open shipments, move pallets, mark loads loaded/unloaded. Cannot create or edit receipt/shipment details, close receipts, or ship. |
+| operator | Office: create and edit receipts and shipments, order lines, receive, load, move, close receipts, ship |
 | manager | + setup (items, locations), adjust qty, hold/release, reopen/void receipts, void any unshipped pallet |
 | admin | + company info |
 
@@ -79,6 +84,31 @@ identifiers you name in **Setup > Company > Pallet Identifiers**:
   work in Lookup.
 - **Handheld scanners:** scan into the first identifier and each Enter moves to
   the next field. The last Enter receives the pallet.
+
+## Office and dock workflow
+
+**Outbound:**
+1. **Office:** create the shipment (customer, appointment, door, carrier).
+2. **Office:** add **order lines**, e.g. "WID-100, BIN Class 714, 2 pallets"
+   or "BOX-5, any, 100 EA". Print the **load sheet**.
+3. **Lift (Dock Mode > Load):** scan the load sheet barcode, then scan pallets.
+   - **Wrong pallets** (item or lot not on the order, or a line already full)
+     are refused with a red WRONG PALLET screen.
+   - **Qty lines** only take what's needed from a pallet, and the rest stays on
+     it.
+4. **Lift:** tap **Done Loading**. The load shows **Loaded** in the office.
+5. **Office:** review, add the seal #, **Ship**, and print the BOL.
+
+**Inbound:**
+1. **Office:** create the receipt with an **expected arrival** and door, then
+   print the **unload sheet**.
+2. **Lift (Dock Mode > Unload):** scan the unload sheet barcode, receive pallets
+   (labels print as usual), then tap **Done Unloading**. The arrival time is
+   stamped at the first pallet.
+3. **Office:** review and **Close Receipt**.
+
+A load with no order lines accepts any in-stock pallet, the same as v0.3.
+Office users can open Dock Mode too, from its tile on the home screen.
 
 ## Shipping
 

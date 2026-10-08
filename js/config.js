@@ -4,5 +4,5 @@
 window.WMS_CONFIG = {
   SUPABASE_URL: 'https://ulclsqwgyvrqjalrmfhr.supabase.co',
   SUPABASE_KEY: 'sb_publishable_Q5VUijpPZXyQNWJdokDXVQ_PAKKcXcy',
-  APP_VERSION: '0.3.0'
+  APP_VERSION: '0.4.0'
 };

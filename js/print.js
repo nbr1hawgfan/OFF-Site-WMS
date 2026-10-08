@@ -335,5 +335,102 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.4in;');
   }
 
-  return { labels, receipt, bol };
+  /* shared look for the dock sheets */
+  const sheetCss = `
+    <style>
+      .ds { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 11pt; }
+      .ds-head { display: flex; justify-content: space-between; align-items: flex-start;
+                 border-bottom: 3pt solid #C41230; padding-bottom: 8pt; margin-bottom: 10pt; }
+      .ds h1 { font-size: 24pt; margin: 0; letter-spacing: 1pt; }
+      .ds .co { font-size: 11pt; font-weight: 700; }
+      .ds .code { font-family: "Courier New", monospace; font-size: 22pt; font-weight: 800; text-align: right; }
+      .ds .bc-big { width: 3.3in; height: .9in; display: block; margin-left: auto; }
+      .ds .who { font-size: 20pt; font-weight: 800; margin: 2pt 0 8pt; }
+      .ds .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6pt 14pt; margin-bottom: 10pt; }
+      .ds .grid span { display: block; font-size: 8pt; font-weight: 700; text-transform: uppercase; color: #444; }
+      .ds .grid div { font-size: 13pt; font-weight: 700; }
+      .ds table { width: 100%; border-collapse: collapse; margin-top: 6pt; }
+      .ds th, .ds td { border: .75pt solid #000; padding: 6pt 6pt; text-align: left; vertical-align: middle; }
+      .ds th { background: #e6e6e6; font-size: 9pt; text-transform: uppercase; }
+      .ds td { font-size: 12pt; height: 22pt; }
+      .ds .num { text-align: right; }
+      .ds .chk { width: 70pt; }
+      .ds .box { display: inline-block; width: 14pt; height: 14pt; border: 1.25pt solid #000; vertical-align: middle; }
+      .ds .note { border: 1.5pt solid #000; padding: 8pt; margin-top: 10pt; font-size: 12pt; }
+      .ds .sign { display: grid; grid-template-columns: 1fr 1fr; gap: 30pt; margin-top: 34pt; }
+      .ds .sign div { border-top: 1pt solid #000; padding-top: 3pt; font-size: 9pt; }
+      .ds .foot { margin-top: 14pt; font-size: 8pt; color: #555; }
+    </style>`;
+  const timeStr = t => {
+    if (!t) return '';
+    const [h, m] = String(t).split(':').map(Number);
+    const d = new Date(); d.setHours(h, m, 0, 0);
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  };
+
+  /* Load sheet: what the lift driver takes to the dock. orders: v_order_progress rows */
+  function loadSheet(ship, orders, settings) {
+    const s = settings || {};
+    const lotLbl = lotLabel(s).split(' /')[0];
+    const html = sheetCss + `
+      <div class="ds">
+        <div class="ds-head">
+          <div><h1>LOAD SHEET</h1><div class="co">${esc((s.company_name || '').replace(/_/g, ' '))}</div></div>
+          <div><div class="code">${esc(ship.shipment_no)}</div><svg class="bc bc-big" data-value="${esc(ship.shipment_no)}" data-h="80"></svg></div>
+        </div>
+        <div class="who">${esc(ship.ship_to_name || '')}</div>
+        <div class="grid">
+          <div><span>Ship date</span>${esc(fmtDate(ship.ship_date))}</div>
+          <div><span>Appointment</span>${esc(timeStr(ship.appt_time) || '-')}</div>
+          <div><span>Door</span>${esc(ship.dock_door || '-')}</div>
+          <div><span>Carrier</span>${esc(ship.carrier || '-')}</div>
+          <div><span>Trailer #</span>${esc(ship.trailer_no || '')}</div>
+          <div><span>Destination</span>${esc([ship.ship_to_city, ship.ship_to_state].filter(Boolean).join(', '))}</div>
+        </div>
+        ${ship.special_instructions ? `<div class="note"><strong>Instructions:</strong> ${esc(ship.special_instructions)}</div>` : ''}
+        <table>
+          <thead><tr><th>SKU</th><th>Description</th><th>${esc(lotLbl)}</th><th class="num">Pallets</th><th class="num">Qty</th><th class="chk">Loaded</th></tr></thead>
+          <tbody>${orders.length ? orders.map(o => `<tr><td><strong>${esc(o.sku)}</strong></td><td>${esc(o.description)}</td>
+              <td><strong>${esc(o.lot_number || 'Any')}</strong></td><td class="num">${esc(o.pallets_ordered ?? '')}</td>
+              <td class="num">${o.qty_ordered ? esc(fmtQty(o.qty_ordered) + ' ' + o.uom) : ''}</td><td><span class="box"></span> ____</td></tr>`).join('')
+            : '<tr><td colspan="6">No order list: load per the paperwork.</td></tr>'}
+            ${'<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(Math.max(0, 4 - orders.length))}</tbody>
+        </table>
+        <div class="sign"><div>Loaded by</div><div>Time finished</div></div>
+        <div class="foot">Scan the barcode above in Dock Mode &gt; Load. Printed ${esc(fmtDateTime(new Date()))}</div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.5in;');
+  }
+
+  /* Unload sheet: for scheduled inbound trucks */
+  function unloadSheet(rcpt, settings) {
+    const s = settings || {};
+    const lotLbl = lotLabel(s).split(' /')[0];
+    const html = sheetCss + `
+      <div class="ds">
+        <div class="ds-head">
+          <div><h1>UNLOAD SHEET</h1><div class="co">${esc((s.company_name || '').replace(/_/g, ' '))}</div></div>
+          <div><div class="code">${esc(rcpt.receipt_no)}</div><svg class="bc bc-big" data-value="${esc(rcpt.receipt_no)}" data-h="80"></svg></div>
+        </div>
+        <div class="who">${esc(rcpt.vendor_name || 'Inbound')}</div>
+        <div class="grid">
+          <div><span>Expected</span>${esc(rcpt.expected_at ? fmtDateTime(rcpt.expected_at) : '-')}</div>
+          <div><span>Door</span>${esc(rcpt.dock_door || '-')}</div>
+          <div><span>PO #</span>${esc(rcpt.po_number || '-')}</div>
+          <div><span>Carrier</span>${esc(rcpt.carrier || '-')}</div>
+          <div><span>Trailer #</span>${esc(rcpt.trailer_no || '')}</div>
+          <div><span>Inbound BOL / PRO</span>${esc(rcpt.inbound_bol || '')}</div>
+        </div>
+        ${rcpt.notes ? `<div class="note"><strong>Notes:</strong> ${esc(rcpt.notes)}</div>` : ''}
+        <table>
+          <thead><tr><th>SKU</th><th>${esc(lotLbl)}</th><th class="num">Pallets</th><th class="num">Qty</th><th>Damage / notes</th></tr></thead>
+          <tbody>${'<tr><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(8)}</tbody>
+        </table>
+        <div class="sign"><div>Unloaded by</div><div>Seal # verified / time</div></div>
+        <div class="foot">Scan the barcode above in Dock Mode &gt; Unload. Printed ${esc(fmtDateTime(new Date()))}</div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.5in;');
+  }
+
+  return { labels, receipt, bol, loadSheet, unloadSheet };
 })();

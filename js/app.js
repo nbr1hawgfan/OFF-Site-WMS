@@ -9,13 +9,17 @@
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
   });
 
-  const RANK = { viewer: 1, operator: 2, manager: 3, admin: 4 };
+  // lift (dock) sits between viewer and operator: it can scan, receive, load and
+  // move, but never edits receipt/shipment details. The database enforces the same.
+  const RANK = { viewer: 1, lift: 1.5, operator: 2, manager: 3, admin: 4 };
   const S = {
     session: null, profile: null, settings: null,
     items: [], locations: [], parties: [],
     lastReceive: loadPref('lastReceive', {})
   };
   const can = role => !!S.profile && S.profile.active && RANK[S.profile.role] >= RANK[role];
+  const isLift = () => !!S.profile && S.profile.active && S.profile.role === 'lift';
+  const canDock = () => isLift() || can('operator');
 
   /* ------------------------------------------------------------------ */
   /* helpers                                                             */
@@ -74,6 +78,7 @@
     return `<span class="badge ${esc(status)}">${esc(String(status).replace('_', ' '))}</span>`;
   }
 
+  function userName(id) { return (S.users || []).find(u => u.id === id)?.full_name || ''; }
   function itemById(id) { return S.items.find(i => i.id === id) || {}; }
   function locById(id) { return S.locations.find(l => l.id === id) || {}; }
   function companyName() { return (S.settings?.company_name || 'Warehouse').replace(/_/g, ' '); }
@@ -237,6 +242,7 @@
       q(sb.from('parties').select('*').order('name'))
     ]);
     S.settings = settings; S.items = items; S.locations = locations; S.parties = parties;
+    S.users = await q(sb.from('app_users').select('id, full_name')).catch(() => []);
     document.title = companyName() + ' WMS';
   }
 
@@ -264,7 +270,7 @@
 
   async function route() {
     const path = location.hash.replace(/^#\/?/, '');
-    const [a, b] = path.split('/');
+    const [a, b, c] = path.split('/');
     navSeq++;
     if (!$('#modal').hidden) closeModal();
     window.scrollTo(0, 0);
@@ -272,7 +278,16 @@
       if (recoveryMode) return viewSetPassword();
       if (!S.session) return viewLogin();
       if (!S.profile || !S.profile.active) return viewNoAccess();
-      if (!a) return viewHome();
+      if (!a) return isLift() ? viewDockHome() : viewHome();
+      if (a === 'dock') {
+        if (!canDock()) { location.hash = '#/'; return; }
+        if (b === 'load' && c) return viewDockLoad(c);
+        if (b === 'load') return viewDockLoads();
+        if (b === 'unload' && c) return viewReceipt(c, null, true);
+        if (b === 'unload') return viewDockReceipts();
+        if (b === 'move') return viewDockMove();
+        return viewDockHome();
+      }
       if (a === 'receipts') return viewReceipts();
       if (a === 'receipt' && b === 'new') return viewNewReceipt();
       if (a === 'receipt' && b) return viewReceipt(b);
@@ -392,6 +407,7 @@
           <span>${pallets.toLocaleString()} pallet${pallets === 1 ? '' : 's'} on hand</span></a>
         <a class="tile" href="#/shipments"><strong>Shipping</strong>
           <span>${openShip ? `${openShip} open shipment${openShip === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
+        ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
         ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, company info</span></a>` : ''}
       </div>
       <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
@@ -404,15 +420,16 @@
     const mySeq = navSeq;
     render(`<div class="loading">Loading...</div>`);
     const rows = await q(sb.from('receipts')
-      .select('id, receipt_no, status, received_at, vendor_name, carrier, trailer_no, po_number, pallets(count)')
+      .select('id, receipt_no, status, received_at, expected_at, unloaded_at, dock_door, vendor_name, carrier, trailer_no, po_number, pallets(count)')
       .order('received_at', { ascending: false }).limit(60));
     if (mySeq !== navSeq) return;
     const open = rows.filter(r => r.status === 'open');
     const rest = rows.filter(r => r.status !== 'open');
     const item = r => `
       <a class="list-item" href="#/receipt/${r.id}">
-        <div class="row spread"><span class="title">${esc(r.receipt_no)}</span>${badge(r.status)}</div>
-        <div class="meta">${esc(fmtDateTime(r.received_at))} &middot; ${r.pallets?.[0]?.count ?? 0} pallets</div>
+        <div class="row spread"><span class="title">${esc(r.receipt_no)}</span>
+          <span>${r.status === 'open' && r.unloaded_at ? '<span class="badge open">Unloaded</span> ' : ''}${badge(r.status)}</span></div>
+        <div class="meta">${r.expected_at && !(r.pallets?.[0]?.count) ? 'Expected ' + esc(fmtDateTime(r.expected_at)) : esc(fmtDateTime(r.received_at))}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''} &middot; ${r.pallets?.[0]?.count ?? 0} pallets</div>
         <div class="meta">${esc([r.vendor_name, r.carrier, r.trailer_no && 'Trailer ' + r.trailer_no, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
       </a>`;
     render(`
@@ -428,11 +445,15 @@
   /* ------------------------------------------------------------------ */
   /* receiving: new receipt                                              */
   /* ------------------------------------------------------------------ */
-  function receiptHeaderFields(r = {}) {
+  function receiptHeaderFields(r = {}, isNew = false) {
     return `
       <div class="grid2">
-        <div class="field"><label for="received_at">Received</label>
-          <input id="received_at" type="datetime-local" value="${esc(toLocalInput(r.received_at))}" required></div>
+        ${isNew ? '' : `<div class="field"><label for="received_at">Received</label>
+          <input id="received_at" type="datetime-local" value="${esc(toLocalInput(r.received_at))}" required></div>`}
+        <div class="field"><label for="expected_at">Expected arrival ${isNew ? '<span class="muted small">(leave blank if the truck is here now)</span>' : ''}</label>
+          <input id="expected_at" type="datetime-local" value="${r.expected_at ? esc(toLocalInput(r.expected_at)) : ''}"></div>
+        <div class="field"><label for="dock_door">Dock door</label>
+          <input id="dock_door" value="${esc(r.dock_door || '')}" maxlength="20"></div>
         <div class="field"><label for="vendor_name">From / Vendor</label>
           <input id="vendor_name" value="${esc(r.vendor_name || '')}" maxlength="120" list="vendor-list" autocomplete="off">
           <datalist id="vendor-list">${vendorSuggestions.map(v => `<option value="${esc(v)}"></option>`).join('')}</datalist></div>
@@ -476,8 +497,9 @@
 
   function readReceiptHeader(root) {
     const v = id => $('#' + id, root).value;
-    return {
-      received_at: new Date(v('received_at')).toISOString(),
+    const row = {
+      expected_at: v('expected_at') ? new Date(v('expected_at')).toISOString() : null,
+      dock_door: strOrNull(v('dock_door')),
       vendor_name: savedVendorName(strOrNull(v('vendor_name'))),
       vendor_id: vendorIdFor(strOrNull(v('vendor_name'))),
       carrier: strOrNull(v('carrier')),
@@ -487,6 +509,8 @@
       inbound_bol: strOrNull(v('inbound_bol')),
       notes: strOrNull(v('notes'))
     };
+    if ($('#received_at', root)) row.received_at = new Date(v('received_at')).toISOString();
+    return row;
   }
 
   async function viewNewReceipt() {
@@ -496,7 +520,7 @@
       <a class="back" href="#/receipts">&larr; Receiving</a>
       <h1>New Receipt</h1>
       <form id="new-rcpt" class="card accent">
-        ${receiptHeaderFields()}
+        ${receiptHeaderFields({}, true)}
         <button class="btn block" id="create-btn">Create Receipt</button>
       </form>`);
     $('#new-rcpt').onsubmit = e => {
@@ -523,7 +547,7 @@
     };
   }
 
-  async function viewReceipt(id, focusId) {
+  async function viewReceipt(id, focusId, dockMode = isLift()) {
     const mySeq = navSeq;
     if (!document.querySelector('#rcpt-page')) render(`<div class="loading">Loading...</div>`);
     const [rcpt, pallets] = await Promise.all([
@@ -532,14 +556,15 @@
         .select('id, lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes')
         .eq('receipt_id', id).order('lp_id'))
     ]);
-    if (rcpt.status === 'open' && can('operator')) await loadVendorSuggestions().catch(() => {});
+    if (rcpt.status === 'open' && can('operator') && !dockMode) await loadVendorSuggestions().catch(() => {});
     if (mySeq !== navSeq) return;
     const active = pallets.filter(p => p.status !== 'void');
     const totalQty = active.reduce((a, p) => a + Number(p.qty_received), 0);
     const activeUoms = [...new Set(active.map(p => itemById(p.item_id).uom))];
     const totalText = active.length && activeUoms.length === 1 ? ` &middot; ${esc(fmtQty(totalQty))} ${esc(activeUoms[0])}` : '';
     const isOpen = rcpt.status === 'open';
-    const editable = isOpen && can('operator');
+    const editable = isOpen && can('operator') && !dockMode;   // receipt details: office only
+    const canReceive = isOpen && canDock();
     const activeItems = S.items.filter(i => i.active);
     const last = S.lastReceive || {};
     const lastItem = activeItems.find(i => i.id === last.item_id);
@@ -549,7 +574,9 @@
 
     const headerView = `
       <dl class="kv">
-        <dt>Received</dt><dd>${esc(fmtDateTime(rcpt.received_at))}</dd>
+        ${rcpt.expected_at ? `<dt>Expected</dt><dd>${esc(fmtDateTime(rcpt.expected_at))}</dd>` : ''}
+        ${active.length || !rcpt.expected_at ? `<dt>Received</dt><dd>${esc(fmtDateTime(rcpt.received_at))}</dd>` : ''}
+        ${rcpt.dock_door ? `<dt>Door</dt><dd>${esc(rcpt.dock_door)}</dd>` : ''}
         <dt>From / Vendor</dt><dd>${esc(rcpt.vendor_name || '-')}</dd>
         <dt>Carrier</dt><dd>${esc(rcpt.carrier || '-')}</dd>
         <dt>Trailer #</dt><dd>${esc(rcpt.trailer_no || '-')}</dd>
@@ -560,7 +587,7 @@
         ${rcpt.status === 'void' ? `<dt>Void reason</dt><dd>${esc(rcpt.void_reason || '')}</dd>` : ''}
       </dl>`;
 
-    const addForm = !editable ? '' : activeItems.length === 0 ? `
+    const addForm = !canReceive ? '' : activeItems.length === 0 ? `
       <div class="card"><div class="notice warn">No items set up yet.
         ${can('manager') ? 'Add items in <a href="#/setup/items">Setup</a> first.' : 'Ask a manager to add items.'}</div></div>` : `
       <form id="add-form" class="card accent" autocomplete="off">
@@ -607,7 +634,7 @@
 
     const palletRow = p => {
       const it = itemById(p.item_id);
-      const canVoid = p.status !== 'void' && p.status !== 'shipped' && (can('manager') || (isOpen && can('operator')));
+      const canVoid = p.status !== 'void' && p.status !== 'shipped' && (can('manager') || (isOpen && canDock()));
       return `
         <div class="list-item pallet ${p.status === 'void' ? 'void' : ''}" ${focusId === p.id ? 'style="border-color:var(--red)"' : ''}>
           <div>
@@ -626,8 +653,9 @@
 
     render(`
       <div id="rcpt-page">
-        <a class="back" href="#/receipts">&larr; Receiving</a>
+        ${dockMode ? `<a class="back" href="#/dock/unload">&larr; Unload</a>` : `<a class="back" href="#/receipts">&larr; Receiving</a>`}
         <div class="row spread"><h1>${esc(rcpt.receipt_no)}</h1>${badge(rcpt.status)}</div>
+        ${isOpen && rcpt.unloaded_at ? `<div class="notice ok">Unloaded ${esc(fmtDateTime(rcpt.unloaded_at))}${userName(rcpt.unloaded_by) ? ' by ' + esc(userName(rcpt.unloaded_by)) : ''}.${dockMode ? ' The office will close it.' : ' Review and close when ready.'}</div>` : ''}
 
         <div class="card">
           ${editable ? `
@@ -646,18 +674,24 @@
           <div style="margin-top:12px">${pallets.length ? pallets.map(palletRow).join('') : '<p class="muted">No pallets yet.</p>'}</div>
         </div>
 
+        ${dockMode ? `
+        <div class="btn-row">
+          <button class="btn secondary" id="print-all" ${active.length ? '' : 'disabled'}>Print All Labels</button>
+          ${isOpen && !rcpt.unloaded_at ? `<button class="btn" id="done-unload" ${active.length ? '' : 'disabled'}>Done Unloading</button>` : ''}
+        </div>` : `
         <div class="btn-row">
           <button class="btn dark" id="print-rcpt" ${active.length ? '' : 'disabled'}>Print Receipt</button>
           <button class="btn secondary" id="print-all" ${active.length ? '' : 'disabled'}>Print All Labels</button>
+          ${isOpen && can('operator') ? `<button class="btn secondary" id="print-unload">Print Unload Sheet</button>` : ''}
           ${isOpen && can('operator') ? `<button class="btn" id="close-rcpt">Close Receipt</button>` : ''}
           ${rcpt.status === 'closed' && can('manager') ? `<button class="btn secondary" id="reopen-rcpt">Reopen</button>` : ''}
           ${rcpt.status !== 'void' && can('manager') ? `<button class="btn danger" id="void-rcpt">Void Receipt</button>` : ''}
-        </div>
+        </div>`}
       </div>`);
 
     const page = $('#rcpt-page');
     wireScanButtons(page);
-    const reload = fid => viewReceipt(id, fid);
+    const reload = fid => viewReceipt(id, fid, dockMode);
 
     /* header save */
     $('#hdr-form', page)?.addEventListener('submit', e => {
@@ -777,8 +811,19 @@
     });
 
     /* receipt actions */
-    $('#print-rcpt', page).onclick = () =>
-      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), S.settings);
+    $('#print-rcpt', page)?.addEventListener('click', () =>
+      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), S.settings));
+    $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, S.settings));
+    $('#done-unload', page)?.addEventListener('click', async () => {
+      const ok = await askConfirm('Done unloading?',
+        `${active.length} pallet${active.length === 1 ? '' : 's'} received on ${esc(rcpt.receipt_no)}. The office will review and close it.`, 'Done Unloading');
+      if (!ok) return;
+      busy($('#done-unload'), async () => {
+        await q(sb.rpc('wms_mark_unloaded', { p_receipt_id: id }));
+        toast(`${rcpt.receipt_no} marked unloaded.`);
+        location.hash = '#/dock/unload';
+      });
+    });
     $('#print-all', page).onclick = () =>
       WmsPrint.labels(active.filter(p => p.status !== 'shipped').map(p => palletForPrint(p, rcpt)), S.settings, loadPref('labelCopies', 1));
 
@@ -817,7 +862,7 @@
     const mySeq = navSeq;
     const stale = () => mySeq !== navSeq || !document.getElementById('lk-results');
     render(`
-      <a class="back" href="#/">&larr; Home</a>
+      <a class="back" href="${isLift() ? '#/dock' : '#/'}">&larr; ${isLift() ? 'Dock' : 'Home'}</a>
       <h1>Inventory Lookup</h1>
       <form id="lk-form" class="card">
         <label for="lk">Scan or search: WMS pallet ID, ${esc([...idFields().map(f => f.label), 'SKU', lbl.lotShort(), 'description'].join(', '))}</label>
@@ -911,7 +956,7 @@
         <dt>Received</dt><dd><a href="#/receipt/${p.receipt_id}" id="pm-rcpt">${esc(p.receipt_no || '')}</a> ${esc(fmtDate(p.received_at))}</dd>
       </dl>
 
-      ${can('operator') ? `
+      ${canDock() ? `
         <form id="pm-move" class="row" style="margin-top:14px">
           <select id="pm-loc" style="flex:1">${locOptions}</select>
           <button class="btn" id="pm-move-btn">Move</button>
@@ -982,6 +1027,278 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* DOCK MODE (lift operators): big buttons, scan-first, no paperwork   */
+  /* ------------------------------------------------------------------ */
+  let dockFlash = null;   // last scan result, shown big after re-render
+  function flash(kind, title, detail) {
+    dockFlash = { kind, title, detail, at: Date.now() };
+    try { if (navigator.vibrate) navigator.vibrate(kind === 'bad' ? [120, 60, 120] : 40); } catch { /* not supported */ }
+  }
+  function flashHtml() {
+    if (!dockFlash || Date.now() - dockFlash.at > 15000) return '';
+    return `<div class="flash ${dockFlash.kind}"><div class="flash-title">${esc(dockFlash.title)}</div>
+      ${dockFlash.detail ? `<div class="flash-detail">${esc(dockFlash.detail)}</div>` : ''}</div>`;
+  }
+  const todayStr = () => toLocalInput().slice(0, 10);
+
+  async function viewDockHome() {
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const countOpen = table => q(sb.from(table).select('id', { count: 'exact', head: true }).eq('status', 'open')
+      .then(r => ({ data: r.count, error: r.error })));
+    const [ships, rcpts] = await Promise.all([countOpen('shipments'), countOpen('receipts')]);
+    if (mySeq !== navSeq) return;
+    render(`
+      ${!isLift() ? '<a class="back" href="#/">&larr; Office</a>' : ''}
+      <h1>Dock</h1>
+      <div class="dock-tiles">
+        <a class="dock-tile" href="#/dock/load"><strong>Load</strong><span>${ships} open load${ships === 1 ? '' : 's'}</span></a>
+        <a class="dock-tile" href="#/dock/unload"><strong>Unload</strong><span>${rcpts} open receipt${rcpts === 1 ? '' : 's'}</span></a>
+        <a class="dock-tile" href="#/dock/move"><strong>Move</strong><span>Put away / relocate</span></a>
+        <a class="dock-tile" href="#/lookup"><strong>Lookup</strong><span>Find a pallet</span></a>
+      </div>
+      <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
+  }
+
+  /* ---------- load: pick a load ---------- */
+  async function viewDockLoads() {
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.from('shipments')
+      .select('id, shipment_no, ship_date, appt_time, dock_door, ship_to_name, carrier, loaded_at, shipment_lines(count)')
+      .eq('status', 'open').order('ship_date').order('appt_time', { nullsFirst: false }).limit(50));
+    if (mySeq !== navSeq) return;
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Load</h1>
+      <form id="pick-load" class="card accent" autocomplete="off">
+        <label for="load-code">Scan the load sheet</label>
+        <div class="input-scan"><input id="load-code" class="big-input" enterkeyhint="go" placeholder="SHP-1001">${scanBtn('load-code', 'pick-load')}</div>
+      </form>
+      <h2>Open loads</h2>
+      ${rows.length ? rows.map(r => `
+        <a class="list-item dock-item" href="#/dock/load/${r.id}">
+          <div class="row spread"><span class="title">${esc(r.ship_to_name || r.shipment_no)}</span>
+            ${r.loaded_at ? '<span class="badge open">Loaded</span>' : r.ship_date <= todayStr() ? '<span class="badge hold">Today</span>' : ''}</div>
+          <div class="meta">${esc(r.shipment_no)} &middot; ${esc(fmtDate(r.ship_date))}${r.appt_time ? ' ' + esc(fmtTime(r.appt_time)) : ''}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''}</div>
+          <div class="meta">${r.shipment_lines?.[0]?.count ?? 0} pallets loaded${r.carrier ? ' &middot; ' + esc(r.carrier) : ''}</div>
+        </a>`).join('') : '<p class="muted">No open loads.</p>'}`);
+    const form = $('#pick-load');
+    wireScanButtons(form);
+    setTimeout(() => $('#load-code')?.focus(), 50);
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy(null, async () => {
+        const code = $('#load-code').value.trim().toUpperCase();
+        if (!code) return;
+        const hit = await q(sb.from('shipments').select('id, status').eq('shipment_no', code).maybeSingle());
+        if (!hit) throw new Error(`No load found for ${code}.`);
+        if (hit.status !== 'open') throw new Error(`${code} is already ${hit.status}.`);
+        dockFlash = null;
+        location.hash = '#/dock/load/' + hit.id;
+      });
+    };
+  }
+
+  /* ---------- load: scan pallets onto one load ---------- */
+  async function viewDockLoad(id) {
+    const mySeq = navSeq;
+    if (!document.querySelector('#dock-load')) render(`<div class="loading">Loading...</div>`);
+    const [ship, lines, orders] = await Promise.all([
+      q(sb.from('shipments').select('id, shipment_no, status, ship_date, appt_time, dock_door, ship_to_name, ship_to_city, ship_to_state, carrier, trailer_no, special_instructions, loaded_at').eq('id', id).single()),
+      q(sb.from('v_shipment_detail').select('*').eq('shipment_id', id).order('created_at', { ascending: false })),
+      q(sb.from('v_order_progress').select('*').eq('shipment_id', id).order('created_at'))
+    ]);
+    if (mySeq !== navSeq) return;
+    const isOpen = ship.status === 'open';
+    const allDone = orders.length > 0 && orders.every(orderDone);
+    const shortText = orders.map(orderRemaining).filter(Boolean).join('; ');
+
+    render(`
+      <div id="dock-load">
+        <a class="back" href="#/dock/load">&larr; Loads</a>
+        <div class="dock-head">
+          <div class="dock-head-main">${esc(ship.ship_to_name || 'No ship-to')}</div>
+          <div>${esc(ship.shipment_no)}${ship.dock_door ? ' &middot; <strong>Door ' + esc(ship.dock_door) + '</strong>' : ''}${ship.appt_time ? ' &middot; ' + esc(fmtTime(ship.appt_time)) : ''}</div>
+          <div class="muted small">${esc([ship.carrier, ship.trailer_no && 'Trailer ' + ship.trailer_no].filter(Boolean).join(' · '))}</div>
+        </div>
+        ${!isOpen ? `<div class="notice warn">This load is ${esc(ship.status)}.</div>` : ''}
+        ${isOpen && ship.loaded_at ? '<div class="notice ok">Marked loaded. The office will ship it. Scanning another pallet reopens it.</div>' : ''}
+        ${ship.special_instructions ? `<div class="notice warn">${esc(ship.special_instructions)}</div>` : ''}
+
+        ${isOpen ? `
+        <form id="load-scan" class="card accent" autocomplete="off">
+          <label for="ld">Scan pallet</label>
+          <input id="ld" class="big-input" enterkeyhint="go" autocomplete="off">
+          <div class="row" style="margin-top:8px">${scanBtn('ld', 'load-scan')}<button class="btn" id="ld-btn">Load</button></div>
+        </form>` : ''}
+        ${flashHtml()}
+
+        ${orders.length ? `<div class="card"><h2>${allDone ? 'Order complete' : 'Needed on this load'}</h2>
+          ${orders.map(o => orderRow(o, false)).join('')}</div>`
+        : '<div class="notice">No order list for this load. Load per the paperwork.</div>'}
+
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Loaded</h2><span class="muted">${lines.length} pallet${lines.length === 1 ? '' : 's'}</span></div>
+          <div style="margin-top:10px">${lines.map(l => `
+            <div class="list-item pallet">
+              <div><div class="lp">${esc(l.lp_id)}</div>
+                <div><strong>${esc(l.sku)}</strong> &middot; ${lotText(l)}</div>
+                ${idText(l) ? `<div class="meta">${idText(l)}</div>` : ''}</div>
+              <div class="qty">${esc(fmtQty(l.qty))}<div class="meta">${esc(l.uom)}</div></div>
+              ${isOpen ? `<div class="row" style="grid-column:1/-1"><button class="btn sm danger" data-unload="${l.pallet_id}">Take off load</button></div>` : ''}
+            </div>`).join('') || '<p class="muted">Nothing loaded yet.</p>'}</div>
+        </div>
+
+        ${isOpen && !ship.loaded_at ? `<button class="btn block" id="done-load" ${lines.length ? '' : 'disabled'}>Done Loading</button>` : ''}
+      </div>`);
+
+    const page = $('#dock-load');
+    wireScanButtons(page);
+    const reload = () => viewDockLoad(id);
+    const input = $('#ld', page);
+    if (input) setTimeout(() => input.focus(), 30);
+
+    $('#load-scan', page)?.addEventListener('submit', e => {
+      e.preventDefault();
+      const code = input.value.trim();
+      if (!code) return;
+      busy($('#ld-btn', page), async () => {
+        try {
+          const found = await q(sb.rpc('wms_find_pallet', { p_code: code }));
+          if (!found.length) throw new Error(`No pallet in stock matches ${code}.`);
+          if (found.length > 1) throw new Error(`${code} matches ${found.length} pallets. Scan the WMS pallet ID.`);
+          const p = found[0];
+          const line = await q(sb.rpc('wms_add_to_shipment', { p_shipment_id: id, p_pallet_id: p.pallet_id, p_qty: null }));
+          const partial = Number(line.qty) < Number(p.qty_available);
+          flash('ok', `LOADED ${p.lp_id}`, `${p.sku} · ${fmtQty(line.qty)} ${p.uom}${partial ? ` (partial: take ${fmtQty(line.qty)} of ${fmtQty(p.qty_available)})` : ''}`);
+        } catch (err) {
+          flash('bad', /WRONG PALLET/.test(friendly(err)) ? 'WRONG PALLET' : 'NOT LOADED', friendly(err).replace(/^WRONG PALLET:\s*/, ''));
+        }
+        await reload();
+      });
+    });
+
+    $$('[data-unload]', page).forEach(b => b.onclick = async () => {
+      const l = lines.find(x => x.pallet_id === b.dataset.unload);
+      if (!await askConfirm(`Take ${l.lp_id} off the load?`, 'Use this if it was scanned by mistake or pulled back off the trailer.', 'Take Off')) return;
+      busy(b, async () => {
+        await q(sb.rpc('wms_remove_from_shipment', { p_shipment_id: id, p_pallet_id: l.pallet_id }));
+        flash('ok', `REMOVED ${l.lp_id}`, 'Taken off this load.');
+        await reload();
+      });
+    });
+
+    $('#done-load', page)?.addEventListener('click', async () => {
+      const msg = shortText
+        ? `<strong>This load is short:</strong> ${esc(shortText)}<br><br>Mark it loaded anyway? The office will see what is missing.`
+        : `${lines.length} pallet${lines.length === 1 ? '' : 's'} on ${esc(ship.shipment_no)}. The office will ship it.`;
+      if (!await askConfirm('Done loading?', msg, 'Done Loading')) return;
+      busy($('#done-load'), async () => {
+        await q(sb.rpc('wms_mark_loaded', { p_shipment_id: id }));
+        dockFlash = null;
+        toast(`${ship.shipment_no} marked loaded.`);
+        location.hash = '#/dock/load';
+      });
+    });
+  }
+
+  /* ---------- unload: pick a receipt ---------- */
+  async function viewDockReceipts() {
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.from('receipts')
+      .select('id, receipt_no, expected_at, received_at, dock_door, vendor_name, carrier, trailer_no, unloaded_at, pallets(count)')
+      .eq('status', 'open').order('expected_at', { nullsFirst: false }).order('received_at').limit(50));
+    if (mySeq !== navSeq) return;
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Unload</h1>
+      <form id="pick-rcpt" class="card accent" autocomplete="off">
+        <label for="rcpt-code">Scan the unload sheet</label>
+        <div class="input-scan"><input id="rcpt-code" class="big-input" enterkeyhint="go" placeholder="RCV-1001">${scanBtn('rcpt-code', 'pick-rcpt')}</div>
+      </form>
+      <h2>Open receipts</h2>
+      ${rows.length ? rows.map(r => `
+        <a class="list-item dock-item" href="#/dock/unload/${r.id}">
+          <div class="row spread"><span class="title">${esc(r.vendor_name || r.receipt_no)}</span>
+            ${r.unloaded_at ? '<span class="badge open">Unloaded</span>' : ''}</div>
+          <div class="meta">${esc(r.receipt_no)}${r.expected_at ? ' &middot; Expected ' + esc(fmtDateTime(r.expected_at)) : ''}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''}</div>
+          <div class="meta">${r.pallets?.[0]?.count ?? 0} pallets${r.carrier ? ' &middot; ' + esc(r.carrier) : ''}${r.trailer_no ? ' &middot; Trailer ' + esc(r.trailer_no) : ''}</div>
+        </a>`).join('') : '<p class="muted">No open receipts. The office creates them.</p>'}`);
+    const form = $('#pick-rcpt');
+    wireScanButtons(form);
+    setTimeout(() => $('#rcpt-code')?.focus(), 50);
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy(null, async () => {
+        const code = $('#rcpt-code').value.trim().toUpperCase();
+        if (!code) return;
+        const hit = await q(sb.from('receipts').select('id, status').eq('receipt_no', code).maybeSingle());
+        if (!hit) throw new Error(`No receipt found for ${code}.`);
+        if (hit.status !== 'open') throw new Error(`${code} is already ${hit.status}.`);
+        location.hash = '#/dock/unload/' + hit.id;
+      });
+    };
+  }
+
+  /* ---------- move ---------- */
+  async function viewDockMove() {
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Move</h1>
+      <form id="mv-form" class="card accent" autocomplete="off">
+        <label for="mv-pallet">1. Scan pallet</label>
+        <div class="input-scan"><input id="mv-pallet" class="big-input" enterkeyhint="next">${scanBtn('mv-pallet')}</div>
+        <div id="mv-info" style="margin:10px 0"></div>
+        <label for="mv-loc">2. Scan or pick location</label>
+        <div class="input-scan"><input id="mv-loc" class="big-input" list="mv-locs" enterkeyhint="go" autocapitalize="characters">${scanBtn('mv-loc', 'mv-form')}</div>
+        <datalist id="mv-locs">${S.locations.filter(l => l.active).map(l => `<option value="${esc(l.code)}"></option>`).join('')}</datalist>
+        <button class="btn block" id="mv-btn" style="margin-top:12px">Move</button>
+      </form>
+      ${flashHtml()}`);
+    const form = $('#mv-form');
+    wireScanButtons(form);
+    const pIn = $('#mv-pallet'), lIn = $('#mv-loc');
+    let pallet = null;
+    setTimeout(() => pIn.focus(), 50);
+
+    const lookupPallet = async () => {
+      const code = pIn.value.trim();
+      pallet = null; $('#mv-info').innerHTML = '';
+      if (!code) return;
+      const found = await q(sb.rpc('wms_find_pallet', { p_code: code }));
+      if (found.length !== 1) {
+        $('#mv-info').innerHTML = `<div class="notice bad">${found.length ? 'More than one pallet matches. Scan the WMS pallet ID.' : 'No pallet in stock matches ' + esc(code) + '.'}</div>`;
+        return;
+      }
+      pallet = found[0];
+      $('#mv-info').innerHTML = `<div class="notice ok"><strong>${esc(pallet.lp_id)}</strong> &middot; ${esc(pallet.sku)} &middot; ${lotText(pallet)} &middot; ${esc(fmtQty(pallet.qty_on_hand))} ${esc(pallet.uom)}<br>Now at <strong>${esc(pallet.location || '-')}</strong></div>`;
+    };
+    pIn.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      busy(null, async () => { await lookupPallet(); if (pallet) lIn.focus(); });
+    });
+    pIn.addEventListener('change', () => busy(null, lookupPallet));
+
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy($('#mv-btn'), async () => {
+        if (!pallet) await lookupPallet();
+        if (!pallet) throw new Error('Scan a pallet first.');
+        const code = lIn.value.trim().toUpperCase();
+        const loc = S.locations.find(l => l.active && l.code.toUpperCase() === code);
+        if (!loc) throw new Error(`Location ${code || '(blank)'} not found.`);
+        if (loc.id === pallet.location_id) throw new Error(`${pallet.lp_id} is already in ${loc.code}.`);
+        await q(sb.rpc('wms_move_pallet', { p_pallet_id: pallet.pallet_id, p_to_location_id: loc.id }));
+        flash('ok', `MOVED ${pallet.lp_id}`, `${pallet.location || '-'} → ${loc.code}`);
+        viewDockMove();
+      });
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
   /* shipping: list                                                      */
   /* ------------------------------------------------------------------ */
   const FREIGHT_TERMS = { prepaid: 'Prepaid', collect: 'Collect', third_party: '3rd Party' };
@@ -992,11 +1309,47 @@
     return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
+  // order line progress, e.g. "WID-100 BIN Class 714: 3 of 5 pallets"
+  function orderNeed(o) {
+    const parts = [];
+    if (o.pallets_ordered) parts.push(`${o.pallets_loaded} of ${o.pallets_ordered} pallet${o.pallets_ordered === 1 ? '' : 's'}`);
+    if (o.qty_ordered) parts.push(`${fmtQty(o.qty_loaded)} of ${fmtQty(o.qty_ordered)} ${o.uom}`);
+    return parts.join(' · ');
+  }
+  function orderDone(o) {
+    return (!o.pallets_ordered || o.pallets_loaded >= o.pallets_ordered) && (!o.qty_ordered || Number(o.qty_loaded) >= Number(o.qty_ordered));
+  }
+  function orderRemaining(o) {
+    if (orderDone(o)) return '';
+    const bits = [];
+    if (o.pallets_ordered && o.pallets_loaded < o.pallets_ordered) bits.push(`${o.pallets_ordered - o.pallets_loaded} pallet${o.pallets_ordered - o.pallets_loaded === 1 ? '' : 's'}`);
+    if (o.qty_ordered && Number(o.qty_loaded) < Number(o.qty_ordered)) bits.push(`${fmtQty(o.qty_ordered - o.qty_loaded)} ${o.uom}`);
+    return `${o.sku}${o.lot_number ? ' ' + lbl.lotShort() + ' ' + o.lot_number : ''} (${bits.join(', ')})`;
+  }
+  function orderPct(o) {
+    const a = o.pallets_ordered ? o.pallets_loaded / o.pallets_ordered : 1;
+    const b = o.qty_ordered ? Number(o.qty_loaded) / Number(o.qty_ordered) : 1;
+    return Math.max(0, Math.min(1, Math.min(a, b)));
+  }
+  function orderRow(o, canDelete) {
+    const done = orderDone(o);
+    return `
+      <div class="list-item order-line ${done ? 'done' : ''}">
+        <div class="row spread">
+          <div><strong>${esc(o.sku)}</strong> &middot; ${o.lot_number ? esc(lbl.lotShort()) + ' ' + esc(o.lot_number) : 'any ' + esc(lbl.lotShort().toLowerCase())}
+            <div class="meta">${esc(o.description)}</div></div>
+          <div style="text-align:right"><strong>${esc(orderNeed(o))}</strong>${done ? '<div class="meta" style="color:var(--ok)">Complete</div>' : ''}</div>
+        </div>
+        <div class="bar"><span style="width:${Math.round(orderPct(o) * 100)}%"></span></div>
+        ${canDelete ? `<div class="row" style="margin-top:6px"><button type="button" class="btn sm ghost" data-ol-del="${o.order_line_id}">Remove line</button></div>` : ''}
+      </div>`;
+  }
+
   async function viewShipments() {
     const mySeq = navSeq;
     render(`<div class="loading">Loading...</div>`);
     const rows = await q(sb.from('shipments')
-      .select('id, shipment_no, status, ship_date, appt_time, ship_to_name, ship_to_city, ship_to_state, carrier, customer_order_no, po_number, shipment_lines(count)')
+      .select('id, shipment_no, status, ship_date, appt_time, dock_door, loaded_at, ship_to_name, ship_to_city, ship_to_state, carrier, customer_order_no, po_number, shipment_lines(count)')
       .order('ship_date', { ascending: false }).order('shipment_no', { ascending: false }).limit(60));
     if (mySeq !== navSeq) return;
     const open = rows.filter(r => r.status === 'open').sort((a, b) =>
@@ -1004,9 +1357,10 @@
     const rest = rows.filter(r => r.status !== 'open');
     const item = r => `
       <a class="list-item" href="#/shipment/${r.id}">
-        <div class="row spread"><span class="title">${esc(r.shipment_no)}</span>${badge(r.status)}</div>
+        <div class="row spread"><span class="title">${esc(r.shipment_no)}</span>
+          <span>${r.status === 'open' && r.loaded_at ? '<span class="badge open">Loaded</span> ' : ''}${badge(r.status)}</span></div>
         <div><strong>${esc(r.ship_to_name || 'No ship-to yet')}</strong>${r.ship_to_city ? ' &middot; ' + esc([r.ship_to_city, r.ship_to_state].filter(Boolean).join(', ')) : ''}</div>
-        <div class="meta">${esc(fmtDate(r.ship_date))}${r.appt_time ? ' at ' + esc(fmtTime(r.appt_time)) : ''} &middot; ${r.shipment_lines?.[0]?.count ?? 0} pallets</div>
+        <div class="meta">${esc(fmtDate(r.ship_date))}${r.appt_time ? ' at ' + esc(fmtTime(r.appt_time)) : ''}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''} &middot; ${r.shipment_lines?.[0]?.count ?? 0} pallets</div>
         <div class="meta">${esc([r.carrier, r.customer_order_no && 'Order ' + r.customer_order_no, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
       </a>`;
     render(`
@@ -1051,6 +1405,8 @@
           <input id="ship_date" type="date" value="${esc(r.ship_date || toLocalInput().slice(0, 10))}" required></div>
         <div class="field"><label for="appt_time">Appointment time</label>
           <input id="appt_time" type="time" value="${esc((r.appt_time || '').slice(0, 5))}"></div>
+        <div class="field"><label for="dock_door">Dock door</label>
+          <input id="dock_door" value="${esc(r.dock_door || '')}" maxlength="20"></div>
         <div class="field"><label for="carrier">Carrier</label><input id="carrier" value="${esc(r.carrier || '')}" maxlength="120"></div>
         <div class="field"><label for="carrier_scac">SCAC</label><input id="carrier_scac" value="${esc(r.carrier_scac || '')}" maxlength="4"></div>
         <div class="field"><label for="trailer_no">Trailer #</label><input id="trailer_no" value="${esc(r.trailer_no || '')}" maxlength="40"></div>
@@ -1096,7 +1452,7 @@
       ship_to_city: strOrNull(v('ship_to_city')), ship_to_state: strOrNull(v('ship_to_state').toUpperCase()),
       ship_to_zip: strOrNull(v('ship_to_zip')), ship_to_contact: strOrNull(v('ship_to_contact')),
       ship_to_phone: strOrNull(v('ship_to_phone')),
-      ship_date: v('ship_date'), appt_time: v('appt_time') || null,
+      ship_date: v('ship_date'), appt_time: v('appt_time') || null, dock_door: strOrNull(v('dock_door')),
       carrier: strOrNull(v('carrier')), carrier_scac: strOrNull(v('carrier_scac').toUpperCase()),
       trailer_no: strOrNull(v('trailer_no')), seal_no: strOrNull(v('seal_no')), pro_number: strOrNull(v('pro_number')),
       freight_terms: v('freight_terms'),
@@ -1143,21 +1499,24 @@
   async function viewShipment(id, focusScan) {
     const mySeq = navSeq;
     if (!document.querySelector('#ship-page')) render(`<div class="loading">Loading...</div>`);
-    const [ship, lines] = await Promise.all([
+    const [ship, lines, orders] = await Promise.all([
       q(sb.from('shipments').select('*').eq('id', id).single()),
-      q(sb.from('v_shipment_detail').select('*').eq('shipment_id', id).order('created_at'))
+      q(sb.from('v_shipment_detail').select('*').eq('shipment_id', id).order('created_at')),
+      q(sb.from('v_order_progress').select('*').eq('shipment_id', id).order('created_at'))
     ]);
     if (mySeq !== navSeq) return;
     const isOpen = ship.status === 'open';
     const editable = isOpen && can('operator');
     const t = shipTotals(lines);
     const qtyText = Object.entries(t.byUom).map(([u, n]) => `${fmtQty(n)} ${u}`).join(' + ');
+    const shortText = orders.map(orderRemaining).filter(Boolean).join('; ');
     const activeItems = S.items.filter(i => i.active);
 
     const headerView = `
       <dl class="kv">
         <dt>Ship to</dt><dd>${esc(ship.ship_to_name || '-')}<br><span class="muted small">${esc([ship.ship_to_address1, ship.ship_to_address2, [ship.ship_to_city, ship.ship_to_state].filter(Boolean).join(', '), ship.ship_to_zip].filter(Boolean).join(' · '))}</span></dd>
         <dt>Ship date</dt><dd>${esc(fmtDate(ship.ship_date))}${ship.appt_time ? ' at ' + esc(fmtTime(ship.appt_time)) : ''}</dd>
+        ${ship.dock_door ? `<dt>Door</dt><dd>${esc(ship.dock_door)}</dd>` : ''}
         <dt>Carrier</dt><dd>${esc([ship.carrier, ship.carrier_scac].filter(Boolean).join(' / ') || '-')}</dd>
         <dt>Trailer / Seal</dt><dd>${esc([ship.trailer_no, ship.seal_no].filter(Boolean).join(' / ') || '-')}</dd>
         <dt>PRO #</dt><dd>${esc(ship.pro_number || '-')}</dd>
@@ -1184,6 +1543,8 @@
       <div id="ship-page">
         <a class="back" href="#/shipments">&larr; Shipping</a>
         <div class="row spread"><h1>${esc(ship.shipment_no)}</h1>${badge(ship.status)}</div>
+        ${isOpen && ship.loaded_at ? `<div class="notice ok">Loaded ${esc(fmtDateTime(ship.loaded_at))}${userName(ship.loaded_by) ? ' by ' + esc(userName(ship.loaded_by)) : ''}. Review, add the seal #, then ship.</div>` : ''}
+        ${isOpen && shortText ? `<div class="notice warn">Still needed: ${esc(shortText)}</div>` : ''}
 
         <div class="card">
           ${editable ? `
@@ -1193,6 +1554,27 @@
               <form id="ship-hdr" style="margin-top:12px">${shipmentHeaderFields(ship)}
                 <button class="btn secondary block" id="ship-hdr-save">Save Shipment Details</button></form>
             </details>` : `<h2>Shipment Details</h2>${headerView}`}
+        </div>
+
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Order</h2>
+            <span class="muted small">${orders.length ? 'Only these products can be loaded' : 'No order lines: any pallet can be loaded'}</span></div>
+          <div style="margin-top:10px">${orders.map(o => orderRow(o, editable)).join('')}</div>
+          ${editable ? `
+          <form id="ol-form" style="margin-top:8px" autocomplete="off">
+            <div class="field"><label for="ol-item">Add product to load</label>
+              <select id="ol-item" required><option value="">Select item...</option>
+                ${activeItems.map(i => `<option value="${i.id}">${esc(i.sku)} — ${esc(i.description)}</option>`).join('')}</select></div>
+            <div class="grid2">
+              <div class="field"><label for="ol-lot">${esc(lbl.lot())} <span class="muted small">(blank = any)</span></label>
+                <input id="ol-lot" maxlength="60"></div>
+              <div class="field"><label for="ol-pallets">Pallets</label>
+                <input id="ol-pallets" type="number" inputmode="numeric" min="1" step="1"></div>
+              <div class="field"><label for="ol-qty">or Qty <span class="muted small">(partial pallets OK)</span></label>
+                <input id="ol-qty" type="number" inputmode="decimal" min="0.01" step="any"></div>
+              <div class="field" style="display:flex;align-items:flex-end"><button class="btn secondary block" id="ol-add">Add to Order</button></div>
+            </div>
+          </form>` : ''}
         </div>
 
         ${editable ? `
@@ -1220,6 +1602,7 @@
         </div>
 
         <div class="btn-row">
+          ${isOpen ? `<button class="btn secondary" id="print-load">Print Load Sheet</button>` : ''}
           <button class="btn dark" id="print-bol" ${lines.length ? '' : 'disabled'}>Print BOL</button>
           ${editable ? `<button class="btn" id="ship-btn" ${lines.length ? '' : 'disabled'}>Ship</button>` : ''}
           ${ship.status !== 'void' && can('manager') ? `<button class="btn danger" id="void-ship">Void Shipment</button>` : ''}
@@ -1295,11 +1678,36 @@
     }));
 
     $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, S.settings);
+    $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, S.settings));
+
+    $('#ol-form', page)?.addEventListener('submit', e => {
+      e.preventDefault();
+      const f = e.target;
+      busy($('#ol-add', f), async () => {
+        const pallets = numOrNull($('#ol-pallets', f).value);
+        const qty = numOrNull($('#ol-qty', f).value);
+        if (!pallets && !qty) throw new Error('Enter pallets, qty, or both.');
+        if (pallets !== null && (!Number.isInteger(pallets) || pallets < 1)) throw new Error('Pallets must be a whole number.');
+        await q(sb.from('shipment_order_lines').insert({
+          shipment_id: id, item_id: $('#ol-item', f).value,
+          lot_number: strOrNull($('#ol-lot', f).value), pallets_ordered: pallets, qty_ordered: qty
+        }));
+        toast('Added to order.');
+        await reload();
+      });
+    });
+    $$('[data-ol-del]', page).forEach(b => b.onclick = () => busy(b, async () => {
+      await q(sb.from('shipment_order_lines').delete().eq('id', b.dataset.olDel));
+      toast('Order line removed.');
+      await reload();
+    }));
 
     $('#ship-btn', page)?.addEventListener('click', async () => {
       if (!ship.ship_to_name) { toast('Add the ship-to before shipping.', 'bad'); return; }
       const ok = await askConfirm(`Ship ${ship.shipment_no}?`,
-        `${t.pallets} pallet${t.pallets === 1 ? '' : 's'} (${esc(qtyText)}) to <strong>${esc(ship.ship_to_name)}</strong>. Inventory will be removed and the shipment locked.`, 'Ship');
+        `${t.pallets} pallet${t.pallets === 1 ? '' : 's'} (${esc(qtyText)}) to <strong>${esc(ship.ship_to_name)}</strong>. Inventory will be removed and the shipment locked.`
+        + (shortText ? `<br><br><strong>This load is short:</strong> ${esc(shortText)}` : '')
+        + (!ship.loaded_at ? '<br><br>The dock has not marked this load as loaded.' : ''), 'Ship');
       if (!ok) return;
       busy($('#ship-btn'), async () => {
         await q(sb.rpc('wms_ship_shipment', { p_shipment_id: id }));
