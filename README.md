@@ -1,9 +1,12 @@
-# RMB Warehouse (Lite WMS)
+# LWH Warehouse (Lite WMS)
 
-Mobile-first warehouse app for RMB Logistics. Static PWA (no build step) on
+Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.4.0 includes:**
+**v0.5.0 includes:**
+- **Schedule:** a daily and weekly calendar of inbound and outbound loads, with
+  late flags. It refreshes every minute.
+- **LWH branding** in the app header, name, and icon.
 - **Sign-in** with roles, including a **lift** role that only sees Dock Mode.
 - **Dock Mode:** big-button Load, Unload, Move, and Lookup screens for the
   floor.
@@ -15,11 +18,8 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, customers & vendors, company info, pallet
   identifiers.
 
-> **Upgrading to v0.4:** run `supabase/migrations/006_dock_mode.sql` in the
-> Supabase SQL Editor **before** publishing these files. Migrations 001–005 are
-> already applied. The current v0.3 app keeps working after 006 is run.
-
-**Planned next:** daily load calendar (inbound and outbound).
+> **Database:** migrations 001–006 are all applied. v0.5 needs no database
+> change.
 
 ## Files
 
@@ -67,7 +67,7 @@ To deactivate someone: `update app_users set active = false where full_name = '.
 
 ## Pallet identifiers
 
-Every pallet gets a **WMS Pallet ID** (e.g. RMB000123), plus up to four
+Every pallet gets a **WMS Pallet ID** (e.g. LWH000123), plus up to four
 identifiers you name in **Setup > Company > Pallet Identifiers**:
 
 | Field | Default name | Example (One Source style) | Rules |
@@ -84,6 +84,34 @@ identifiers you name in **Setup > Company > Pallet Identifiers**:
   work in Lookup.
 - **Handheld scanners:** scan into the first identifier and each Enter moves to
   the next field. The last Enter receives the pallet.
+
+## Schedule
+
+**Home > Schedule** (and **Dock > Schedule**) shows every truck by day or week:
+- **Inbound:** receipts at their **Expected arrival**, or their received time
+  for walk-ins.
+- **Outbound:** shipments at **Ship date + Appointment**.
+
+| Color | Meaning |
+|---|---|
+| Gray | Scheduled |
+| Amber | In progress (unloading / loading) |
+| Green | Unloaded / Loaded, waiting on the office |
+| Dark | Done (closed / shipped) |
+| Red | Late (past its time with nothing started) |
+
+Tapping an entry opens it. Office users go to the receipt or shipment, and lift
+users go straight to the Dock screen. Filter by In/Out. The page refreshes every
+minute, so it works as a wall display on a dock TV.
+
+## Branding
+
+- **App frame:** the header mark and app name come from `BRAND_SHORT` /
+  `BRAND_NAME` in `js/config.js`. The icons are in `icons/`.
+- **Printed documents:** labels, receipts, BOLs, and sheets use **Setup >
+  Company** (name, address, phone).
+- **Pallet ID prefix:** set in Setup > Company. It can be changed until real
+  (non-voided) pallets exist.
 
 ## Office and dock workflow
 
@@ -148,7 +176,7 @@ receipts. Customers will fill in the ship-to on shipments and BOLs.
 - **Handheld scanners in keyboard mode** scan straight into any field.
 - **The Scan button** uses the phone camera. The site must be on HTTPS (GitHub
   Pages is) and the user must allow camera access.
-- **Lookup** accepts our pallet ID (RMB000123), a customer pallet ID, a SKU, a
+- **Lookup** accepts our pallet ID (LWH000123), a customer pallet ID, a SKU, a
   lot, or a description.
 
 ## How inventory stays correct
