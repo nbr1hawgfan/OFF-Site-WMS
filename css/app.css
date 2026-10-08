@@ -166,9 +166,9 @@ table.data td.num, table.data th.num { text-align: right; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; font-weight: 600; }
 
-.tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto; }
 .tabs a {
-  flex: 1; text-align: center; padding: 10px; border-radius: 8px;
+  flex: 1 0 auto; text-align: center; padding: 10px 10px; border-radius: 8px; font-size: 16px;
   border: 1.5px solid var(--line); background: #fff; color: var(--ink);
   text-decoration: none; font-weight: 700;
 }

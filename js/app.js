@@ -12,7 +12,7 @@
   const RANK = { viewer: 1, operator: 2, manager: 3, admin: 4 };
   const S = {
     session: null, profile: null, settings: null,
-    items: [], locations: [],
+    items: [], locations: [], parties: [],
     lastReceive: loadPref('lastReceive', {})
   };
   const can = role => !!S.profile && S.profile.active && RANK[S.profile.role] >= RANK[role];
@@ -37,7 +37,7 @@
     if (/Failed to fetch|NetworkError|Load failed|network/i.test(m)) return 'No connection. Check Wi-Fi and try again.';
     if (/items_sku_key/i.test(m)) return 'That SKU already exists.';
     if (/locations_code_key/i.test(m)) return 'That location code already exists.';
-    if (/ux_pallets_customer_pallet_id/i.test(m)) return 'That customer pallet ID is already in use.';
+    if (/ux_pallets_customer_pallet_id/i.test(m)) return `That ${lbl.cust()} is already in use.`;
     if (/Invalid login credentials/i.test(m)) return 'Email or password is incorrect.';
     if (/JWT expired|invalid JWT/i.test(m)) return 'Your session expired. Please sign in again.';
     return m;
@@ -77,6 +77,30 @@
   function itemById(id) { return S.items.find(i => i.id === id) || {}; }
   function locById(id) { return S.locations.find(l => l.id === id) || {}; }
   function companyName() { return (S.settings?.company_name || 'Warehouse').replace(/_/g, ' '); }
+
+  /* customer-configurable identifier labels (Company setup) */
+  const lbl = {
+    lot: () => S.settings?.lot_label || 'Lot / Production #',
+    lotShort: () => (S.settings?.lot_label || 'Lot').split(' /')[0].trim(),
+    cust: () => S.settings?.cust_pallet_label || 'Customer Pallet ID',
+    ref1: () => S.settings?.ref1_label || null,
+    ref2: () => S.settings?.ref2_label || null
+  };
+  // extra identifiers that are switched on: [{ key, field, label, required, unique }]
+  function idFields() {
+    const st = S.settings || {};
+    const out = [{ key: 'cust_id', field: 'customer_pallet_id', label: lbl.cust(), required: !!st.cust_pallet_required, unique: true }];
+    if (st.ref1_label) out.push({ key: 'ref1', field: 'ref1', label: st.ref1_label, required: !!st.ref1_required, unique: !!st.ref1_unique });
+    if (st.ref2_label) out.push({ key: 'ref2', field: 'ref2', label: st.ref2_label, required: !!st.ref2_required, unique: !!st.ref2_unique });
+    return out;
+  }
+  // "Pallet ID P-1 · PGID PG-7" for list rows
+  function idText(p) {
+    return idFields().filter(f => p[f.field]).map(f => `${esc(f.label)} ${esc(p[f.field])}`).join(' &middot; ');
+  }
+  function lotText(p) {
+    return p.lot_number ? `${esc(lbl.lotShort())} ${esc(p.lot_number)}` : `No ${esc(lbl.lotShort().toLowerCase())}`;
+  }
 
   function toLocalInput(d) {
     const dt = d ? new Date(d) : new Date();
@@ -206,12 +230,13 @@
   }
 
   async function loadRef() {
-    const [settings, items, locations] = await Promise.all([
+    const [settings, items, locations, parties] = await Promise.all([
       q(sb.from('settings').select('*').eq('id', 1).single()),
       q(sb.from('items').select('*').order('sku')),
-      q(sb.from('locations').select('*').order('sort_order').order('code'))
+      q(sb.from('locations').select('*').order('sort_order').order('code')),
+      q(sb.from('parties').select('*').order('name'))
     ]);
-    S.settings = settings; S.items = items; S.locations = locations;
+    S.settings = settings; S.items = items; S.locations = locations; S.parties = parties;
     document.title = companyName() + ' WMS';
   }
 
@@ -233,10 +258,14 @@
   /* router                                                              */
   /* ------------------------------------------------------------------ */
   let recoveryMode = false;
+  // bumps on every navigation; screens that finish loading after the user
+  // has moved on check this and quietly stop instead of drawing over the new page
+  let navSeq = 0;
 
   async function route() {
     const path = location.hash.replace(/^#\/?/, '');
     const [a, b] = path.split('/');
+    navSeq++;
     if (!$('#modal').hidden) closeModal();
     window.scrollTo(0, 0);
     try {
@@ -340,11 +369,13 @@
   /* home                                                                */
   /* ------------------------------------------------------------------ */
   async function viewHome() {
+    const mySeq = navSeq;
     render(`<div class="loading">Loading...</div>`);
     const [openCount, onHand] = await Promise.all([
       q(sb.from('receipts').select('id', { count: 'exact', head: true }).eq('status', 'open').then(r => ({ data: r.count, error: r.error }))),
       q(sb.from('v_inventory_by_lot').select('pallets'))
     ]);
+    if (mySeq !== navSeq) return;
     const pallets = onHand.reduce((a, r) => a + Number(r.pallets), 0);
     render(`
       <h1>${esc(companyName())}</h1>
@@ -363,10 +394,12 @@
   /* receiving: list                                                     */
   /* ------------------------------------------------------------------ */
   async function viewReceipts() {
+    const mySeq = navSeq;
     render(`<div class="loading">Loading...</div>`);
     const rows = await q(sb.from('receipts')
       .select('id, receipt_no, status, received_at, vendor_name, carrier, trailer_no, po_number, pallets(count)')
       .order('received_at', { ascending: false }).limit(60));
+    if (mySeq !== navSeq) return;
     const open = rows.filter(r => r.status === 'open');
     const rest = rows.filter(r => r.status !== 'open');
     const item = r => `
@@ -394,7 +427,8 @@
         <div class="field"><label for="received_at">Received</label>
           <input id="received_at" type="datetime-local" value="${esc(toLocalInput(r.received_at))}" required></div>
         <div class="field"><label for="vendor_name">From / Vendor</label>
-          <input id="vendor_name" value="${esc(r.vendor_name || '')}" maxlength="120"></div>
+          <input id="vendor_name" value="${esc(r.vendor_name || '')}" maxlength="120" list="vendor-list" autocomplete="off">
+          <datalist id="vendor-list">${vendorSuggestions.map(v => `<option value="${esc(v)}"></option>`).join('')}</datalist></div>
         <div class="field"><label for="carrier">Carrier</label>
           <input id="carrier" value="${esc(r.carrier || '')}" maxlength="120"></div>
         <div class="field"><label for="trailer_no">Trailer #</label>
@@ -409,11 +443,36 @@
       <div class="field"><label for="notes">Notes</label>
         <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>`;
   }
+  // saved vendors first, then names typed on recent receipts
+  let vendorSuggestions = [];
+  async function loadVendorSuggestions() {
+    const recent = await q(sb.from('receipts').select('vendor_name').not('vendor_name', 'is', null)
+      .order('received_at', { ascending: false }).limit(300));
+    const saved = S.parties.filter(p => p.active && p.party_type !== 'consignee').map(p => p.name);
+    const seen = new Set(); vendorSuggestions = [];
+    for (const n of [...saved, ...recent.map(r => r.vendor_name)]) {
+      const k = n.trim().toUpperCase();
+      if (k && !seen.has(k)) { seen.add(k); vendorSuggestions.push(n.trim()); }
+    }
+  }
+  // typed "one source plant" -> stored as the saved vendor's spelling
+  function savedVendorName(name) {
+    if (!name) return null;
+    const m = S.parties.find(p => p.party_type !== 'consignee' && p.name.trim().toUpperCase() === name.trim().toUpperCase());
+    return m ? m.name : name;
+  }
+  function vendorIdFor(name) {
+    if (!name) return null;
+    const m = S.parties.find(p => p.party_type !== 'consignee' && p.name.trim().toUpperCase() === name.trim().toUpperCase());
+    return m ? m.id : null;
+  }
+
   function readReceiptHeader(root) {
     const v = id => $('#' + id, root).value;
     return {
       received_at: new Date(v('received_at')).toISOString(),
-      vendor_name: strOrNull(v('vendor_name')),
+      vendor_name: savedVendorName(strOrNull(v('vendor_name'))),
+      vendor_id: vendorIdFor(strOrNull(v('vendor_name'))),
       carrier: strOrNull(v('carrier')),
       trailer_no: strOrNull(v('trailer_no')),
       seal_no: strOrNull(v('seal_no')),
@@ -423,8 +482,9 @@
     };
   }
 
-  function viewNewReceipt() {
+  async function viewNewReceipt() {
     if (!can('operator')) { location.hash = '#/receipts'; return; }
+    await loadVendorSuggestions().catch(() => {});
     render(`
       <a class="back" href="#/receipts">&larr; Receiving</a>
       <h1>New Receipt</h1>
@@ -457,13 +517,16 @@
   }
 
   async function viewReceipt(id, focusId) {
+    const mySeq = navSeq;
     if (!document.querySelector('#rcpt-page')) render(`<div class="loading">Loading...</div>`);
     const [rcpt, pallets] = await Promise.all([
       q(sb.from('receipts').select('*').eq('id', id).single()),
       q(sb.from('pallets')
-        .select('id, lp_id, customer_pallet_id, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes')
+        .select('id, lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes')
         .eq('receipt_id', id).order('lp_id'))
     ]);
+    if (rcpt.status === 'open' && can('operator')) await loadVendorSuggestions().catch(() => {});
+    if (mySeq !== navSeq) return;
     const active = pallets.filter(p => p.status !== 'void');
     const totalQty = active.reduce((a, p) => a + Number(p.qty_received), 0);
     const activeUoms = [...new Set(active.map(p => itemById(p.item_id).uom))];
@@ -501,21 +564,23 @@
             ${activeItems.map(i => `<option value="${i.id}" ${lastItem && lastItem.id === i.id ? 'selected' : ''}>${esc(i.sku)} — ${esc(i.description)}</option>`).join('')}
           </select></div>
         <div class="grid2">
-          <div class="field"><label for="lot">Lot / Production # <span id="lot-req" class="muted small"></span></label>
+          <div class="field"><label for="lot">${esc(lbl.lot())} <span id="lot-req" class="muted small"></span></label>
             <div class="input-scan"><input id="lot" value="${esc(last.lot || '')}" maxlength="60">${scanBtn('lot')}</div></div>
           <div class="field"><label for="qty">Qty per pallet <span id="uom" class="muted small"></span></label>
             <input id="qty" type="number" inputmode="decimal" min="0.01" step="any" value="${esc(last.qty ?? '')}" required></div>
           <div class="field"><label for="count">Number of pallets</label>
             <input id="count" type="number" inputmode="numeric" min="1" max="50" step="1" value="1" required>
-            <div class="hint">Same item, lot and qty on each.</div></div>
+            <div class="hint">Same item, ${esc(lbl.lotShort().toLowerCase())} and qty on each.</div></div>
           <div class="field"><label for="location_id">Put to location</label>
             <select id="location_id">
               ${S.locations.filter(l => l.active).map(l => `<option value="${l.id}" ${(last.location_id ? last.location_id === l.id : dock && dock.id === l.id) ? 'selected' : ''}>${esc(l.code)}</option>`).join('')}
             </select></div>
         </div>
-        <div class="field"><label for="cust_id">Customer pallet ID (optional)</label>
-          <div class="input-scan"><input id="cust_id" maxlength="60" placeholder="Leave blank to use ours">${scanBtn('cust_id')}</div>
-          <div class="hint">Only when receiving one pallet at a time.</div></div>
+        ${idFields().map(f => `
+        <div class="field"><label for="${f.key}">${esc(f.label)} <span class="muted small">${f.required ? '(required)' : '(optional)'}</span></label>
+          <div class="input-scan"><input id="${f.key}" maxlength="60" ${f.required ? 'required' : ''}
+            ${f.key === 'cust_id' && !f.required ? 'placeholder="Leave blank to use ours"' : ''}>${scanBtn(f.key)}</div>
+          ${f.unique ? '<div class="hint">Unique per pallet: receive one pallet at a time when filled in.</div>' : ''}</div>`).join('')}
         <details class="more"><summary>More: dates and notes</summary>
           <div class="grid2">
             <div class="field"><label for="prod_date">Production date</label><input id="prod_date" type="date"></div>
@@ -540,8 +605,9 @@
         <div class="list-item pallet ${p.status === 'void' ? 'void' : ''}" ${focusId === p.id ? 'style="border-color:var(--red)"' : ''}>
           <div>
             <div class="lp">${esc(p.lp_id)} ${p.status !== 'on_hand' ? badge(p.status) : ''}</div>
-            <div><strong>${esc(it.sku)}</strong> &middot; ${p.lot_number ? 'Lot ' + esc(p.lot_number) : 'No lot'}</div>
-            <div class="meta">${esc(locById(p.location_id).code || '')}${p.customer_pallet_id ? ' &middot; Cust ' + esc(p.customer_pallet_id) : ''}${p.expiration_date ? ' &middot; Exp ' + esc(fmtDate(p.expiration_date)) : ''}</div>
+            <div><strong>${esc(it.sku)}</strong> &middot; ${lotText(p)}</div>
+            <div class="meta">${esc(locById(p.location_id).code || '')}${p.expiration_date ? ' &middot; Exp ' + esc(fmtDate(p.expiration_date)) : ''}</div>
+            ${idText(p) ? `<div class="meta">${idText(p)}</div>` : ''}
           </div>
           <div class="qty">${esc(fmtQty(p.qty_received))}<div class="meta">${esc(it.uom || '')}</div></div>
           ${p.status !== 'void' ? `<div class="row" style="grid-column:1/-1">
@@ -611,9 +677,18 @@
       syncItem(false);
       if (!$('#qty', form).value) { const it = itemById(itemSel.value); if (it.units_per_pallet) $('#qty', form).value = Number(it.units_per_pallet); }
 
-      // a handheld scanner sends Enter: move to the next field instead of submitting
-      ['lot', 'cust_id'].forEach(fid => $('#' + fid, form).addEventListener('keydown', ev => {
-        if (ev.key === 'Enter') { ev.preventDefault(); (fid === 'lot' ? $('#qty', form) : $('#receive-btn', form)).focus(); }
+      // a handheld scanner sends Enter after each scan: step through the
+      // identifier fields, then Receive, instead of submitting early
+      const ids = idFields();
+      $('#lot', form).addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') { ev.preventDefault(); $('#qty', form).focus(); }
+      });
+      ids.forEach((f, i) => $('#' + f.key, form).addEventListener('keydown', ev => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        const next = ids[i + 1];
+        if (next) $('#' + next.key, form).focus();
+        else form.requestSubmit();
       }));
 
       form.onsubmit = e => {
@@ -623,13 +698,16 @@
           const qty = numOrNull($('#qty', form).value);
           const count = Math.floor(Number($('#count', form).value || 1));
           const lot = strOrNull($('#lot', form).value);
-          const cust = strOrNull($('#cust_id', form).value);
+          const vals = Object.fromEntries(ids.map(f => [f.key, strOrNull($('#' + f.key, form).value)]));
           const locId = $('#location_id', form).value || null;
           if (!it.id) throw new Error('Select an item.');
           if (!qty || qty <= 0) throw new Error('Enter a quantity greater than zero.');
           if (count < 1 || count > 50) throw new Error('Number of pallets must be 1 to 50.');
-          if (it.lot_required && !lot) throw new Error(`Lot / production number is required for ${it.sku}.`);
-          if (cust && count > 1) throw new Error('A customer pallet ID can only be used when receiving one pallet.');
+          if (it.lot_required && !lot) throw new Error(`${lbl.lot()} is required for ${it.sku}.`);
+          for (const f of ids) {
+            if (f.required && !vals[f.key]) throw new Error(`${f.label} is required.`);
+            if (f.unique && vals[f.key] && count > 1) throw new Error(`${f.label} is unique per pallet. Receive one pallet at a time.`);
+          }
 
           const doPrint = $('#print_labels', form).checked;
           const copies = Number($('#copies', form).value) || 1;
@@ -646,10 +724,12 @@
                 p_qty: qty,
                 p_lot_number: lot,
                 p_location_id: locId,
-                p_customer_pallet_id: cust,
+                p_customer_pallet_id: vals.cust_id,
                 p_production_date: $('#prod_date', form).value || null,
                 p_expiration_date: $('#exp_date', form).value || null,
-                p_notes: strOrNull($('#p_notes', form).value)
+                p_notes: strOrNull($('#p_notes', form).value),
+                ...(lbl.ref1() ? { p_ref1: vals.ref1 } : {}),
+                ...(lbl.ref2() ? { p_ref2: vals.ref2 } : {})
               })));
             }
           } catch (err) {
@@ -664,8 +744,9 @@
               : `Received ${received.length} pallets: ${received[0].lp_id} to ${received[received.length - 1].lp_id}.`);
           }
           await reload(received[received.length - 1].id);
-          const next = $('#cust_id') && cust ? $('#cust_id') : $('#qty');
-          next?.focus();
+          // ready for the next pallet: back to the first identifier that was used
+          const firstUsed = ids.find(f => vals[f.key] || f.required);
+          (firstUsed ? $('#' + firstUsed.key) : $('#qty'))?.focus();
           if (doPrint) WmsPrint.labels(received.map(p => palletForPrint(p, rcpt)), S.settings, copies);
         });
       };
@@ -726,11 +807,13 @@
   /* inventory lookup                                                    */
   /* ------------------------------------------------------------------ */
   async function viewLookup(term) {
+    const mySeq = navSeq;
+    const stale = () => mySeq !== navSeq || !document.getElementById('lk-results');
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <h1>Inventory Lookup</h1>
       <form id="lk-form" class="card">
-        <label for="lk">Pallet ID, customer pallet ID, SKU, lot, or description</label>
+        <label for="lk">Scan or search: WMS pallet ID, ${esc([...idFields().map(f => f.label), 'SKU', lbl.lotShort(), 'description'].join(', '))}</label>
         <div class="input-scan"><input id="lk" value="${esc(term)}" autocomplete="off" enterkeyhint="search">${scanBtn('lk', 'lk-form')}</div>
         <div class="btn-row"><button class="btn" id="lk-btn">Search</button>
           ${term ? `<a class="btn ghost" href="#/lookup">Show all on hand</a>` : ''}</div>
@@ -749,12 +832,13 @@
     const out = $('#lk-results');
     if (!term) {
       const rows = await q(sb.from('v_inventory_by_lot').select('*').order('sku').order('lot_number'));
+      if (stale()) return;
       const totalPallets = rows.reduce((a, r) => a + Number(r.pallets), 0);
       out.innerHTML = `
-        <div class="card"><div class="row spread"><h2 style="margin:0">On Hand by Lot</h2>
+        <div class="card"><div class="row spread"><h2 style="margin:0">On Hand by ${esc(lbl.lotShort())}</h2>
           <span class="muted">${totalPallets} pallets</span></div>
           ${rows.length ? `<div class="table-wrap" style="margin-top:10px"><table class="data">
-            <thead><tr><th>SKU</th><th>Lot</th><th class="num">Pallets</th><th class="num">On hand</th><th class="num">Avail</th></tr></thead>
+            <thead><tr><th>SKU</th><th>${esc(lbl.lotShort())}</th><th class="num">Pallets</th><th class="num">On hand</th><th class="num">Avail</th></tr></thead>
             <tbody>${rows.map(r => `<tr data-term="${esc(r.sku)}" style="cursor:pointer">
               <td><strong>${esc(r.sku)}</strong><div class="muted small">${esc(r.description)}</div></td>
               <td>${esc(r.lot_number || '-')}</td><td class="num">${r.pallets}</td>
@@ -766,15 +850,16 @@
       return;
     }
 
-    // exact pallet match first (LP ID or customer pallet ID)
+    // exact pallet match first (our pallet ID, customer pallet ID, ref1, ref2)
     let rows = await q(sb.rpc('wms_find_pallet', { p_code: term }));
     let exact = rows.length > 0;
     if (!exact) {
       const safe = term.replace(/[,()*%\\]/g, ' ').trim();
       rows = safe ? await q(sb.from('v_inventory').select('*')
-        .or(`sku.ilike.*${safe}*,lot_number.ilike.*${safe}*,description.ilike.*${safe}*,lp_id.ilike.*${safe}*,customer_pallet_id.ilike.*${safe}*`)
+        .or(`sku.ilike.*${safe}*,lot_number.ilike.*${safe}*,description.ilike.*${safe}*,lp_id.ilike.*${safe}*,customer_pallet_id.ilike.*${safe}*,ref1.ilike.*${safe}*,ref2.ilike.*${safe}*`)
         .order('sku').order('lot_number').order('lp_id').limit(200)) : [];
     }
+    if (stale()) return;
     if (!rows.length) {
       out.innerHTML = `<div class="notice warn">Nothing in stock matches "${esc(term)}".</div>`;
       return;
@@ -787,8 +872,9 @@
         <a class="list-item pallet" href="#" data-pallet="${r.pallet_id}">
           <div>
             <div class="lp">${esc(r.lp_id)} ${r.status !== 'on_hand' ? badge(r.status) : ''}</div>
-            <div><strong>${esc(r.sku)}</strong> &middot; ${r.lot_number ? 'Lot ' + esc(r.lot_number) : 'No lot'}</div>
-            <div class="meta">${esc(r.location || '')}${r.customer_pallet_id ? ' &middot; Cust ' + esc(r.customer_pallet_id) : ''} &middot; Rcvd ${esc(fmtDate(r.received_at))}</div>
+            <div><strong>${esc(r.sku)}</strong> &middot; ${lotText(r)}</div>
+            <div class="meta">${esc(r.location || '')} &middot; Rcvd ${esc(fmtDate(r.received_at))}</div>
+            ${idText(r) ? `<div class="meta">${idText(r)}</div>` : ''}
           </div>
           <div class="qty">${esc(fmtQty(r.qty_on_hand))}<div class="meta">${esc(r.uom)}</div></div>
         </a>`).join('')}`;
@@ -808,11 +894,11 @@
     body.innerHTML = `
       <dl class="kv">
         <dt>Item</dt><dd>${esc(p.sku)} — ${esc(p.description)}</dd>
-        <dt>Lot / Prod #</dt><dd>${esc(p.lot_number || '-')}</dd>
+        <dt>${esc(lbl.lot())}</dt><dd>${esc(p.lot_number || '-')}</dd>
         <dt>On hand</dt><dd>${esc(fmtQty(p.qty_on_hand))} ${esc(p.uom)}${Number(p.qty_allocated) ? ` (${esc(fmtQty(p.qty_allocated))} allocated)` : ''}</dd>
         <dt>Location</dt><dd>${esc(p.location || '-')}</dd>
         <dt>Status</dt><dd>${badge(p.status)}</dd>
-        ${p.customer_pallet_id ? `<dt>Cust. pallet</dt><dd>${esc(p.customer_pallet_id)}</dd>` : ''}
+        ${idFields().filter(f => p[f.field]).map(f => `<dt>${esc(f.label)}</dt><dd>${esc(p[f.field])}</dd>`).join('')}
         ${p.production_date ? `<dt>Produced</dt><dd>${esc(fmtDate(p.production_date))}</dd>` : ''}
         ${p.expiration_date ? `<dt>Expires</dt><dd>${esc(fmtDate(p.expiration_date))}</dd>` : ''}
         <dt>Received</dt><dd><a href="#/receipt/${p.receipt_id}" id="pm-rcpt">${esc(p.receipt_no || '')}</a> ${esc(fmtDate(p.received_at))}</dd>
@@ -889,12 +975,12 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /* setup: items, locations, company                                    */
+  /* setup: items, locations, customers & vendors, company              */
   /* ------------------------------------------------------------------ */
   async function viewSetup(tab) {
     if (!can('manager')) { location.hash = '#/'; return; }
     await loadRef();
-    const tabs = [['items', 'Items'], ['locations', 'Locations']].concat(can('admin') ? [['company', 'Company']] : []);
+    const tabs = [['items', 'Items'], ['locations', 'Locations'], ['parties', 'Customers']].concat(can('admin') ? [['company', 'Company']] : []);
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <h1>Setup</h1>
@@ -902,6 +988,7 @@
       <div id="setup-body"></div>`);
     const out = $('#setup-body');
     if (tab === 'locations') return setupLocations(out);
+    if (tab === 'parties') return setupParties(out);
     if (tab === 'company' && can('admin')) return setupCompany(out);
     return setupItems(out);
   }
@@ -914,7 +1001,7 @@
         <a class="list-item" href="#" data-item="${i.id}" style="${i.active ? '' : 'opacity:.55'}">
           <div class="row spread"><span class="title">${esc(i.sku)}</span>${i.active ? '' : badge('inactive')}</div>
           <div>${esc(i.description)}</div>
-          <div class="meta">${esc(i.uom)}${i.units_per_pallet ? ` &middot; ${esc(fmtQty(i.units_per_pallet))} per pallet` : ''} &middot; Lot ${i.lot_required ? 'required' : 'optional'}</div>
+          <div class="meta">${esc(i.uom)}${i.units_per_pallet ? ` &middot; ${esc(fmtQty(i.units_per_pallet))} per pallet` : ''} &middot; ${esc(lbl.lotShort())} ${i.lot_required ? 'required' : 'optional'}</div>
         </a>`).join('') : '<p class="muted">No items yet. Add the products this warehouse stores.</p>'}`;
     $('#add-item', out).onclick = () => itemForm(null);
     $$('[data-item]', out).forEach(a => a.onclick = e => { e.preventDefault(); itemForm(S.items.find(i => i.id === a.dataset.item)); });
@@ -940,7 +1027,7 @@
           <div class="field"><label for="f-nmfc">NMFC #</label>
             <input id="f-nmfc" value="${esc(i.nmfc || '')}" maxlength="20"></div>
         </div>
-        <div class="field"><label class="check"><input type="checkbox" id="f-lot" ${i.lot_required ? 'checked' : ''}> Lot / production # required</label></div>
+        <div class="field"><label class="check"><input type="checkbox" id="f-lot" ${i.lot_required ? 'checked' : ''}> ${esc(lbl.lot())} required</label></div>
         <div class="field"><label class="check"><input type="checkbox" id="f-active" ${i.active ? 'checked' : ''}> Active</label></div>
         <div class="field"><label for="f-notes">Notes</label><input id="f-notes" value="${esc(i.notes || '')}" maxlength="300"></div>
         <button class="btn block" id="item-save">${it ? 'Save Item' : 'Add Item'}</button>
@@ -1010,6 +1097,68 @@
     }));
   }
 
+  const PARTY_TYPES = { consignee: 'Customer / Ship-to', vendor: 'Vendor / Ship-from', both: 'Both' };
+
+  function setupParties(out) {
+    const rows = S.parties;
+    out.innerHTML = `
+      <div class="row spread" style="margin-bottom:10px">
+        <span class="muted">${rows.length} saved</span>
+        <button class="btn" id="add-party">Add</button></div>
+      <p class="muted small">Vendors show up as suggestions on receipts. Customers / ship-tos will fill in the ship-to on shipments and BOLs.</p>
+      ${rows.length ? rows.map(r => `
+        <a class="list-item" href="#" data-party="${r.id}" style="${r.active ? '' : 'opacity:.55'}">
+          <div class="row spread"><span class="title">${esc(r.name)}</span>${r.active ? '' : badge('inactive')}</div>
+          <div class="meta">${esc(PARTY_TYPES[r.party_type] || r.party_type)}</div>
+          <div class="meta">${esc([r.address_line1, [r.city, r.state].filter(Boolean).join(', '), r.zip].filter(Boolean).join(' · '))}</div>
+        </a>`).join('') : '<p class="muted">Nothing saved yet.</p>'}`;
+    $('#add-party', out).onclick = () => partyForm(null);
+    $$('[data-party]', out).forEach(a => a.onclick = e => { e.preventDefault(); partyForm(rows.find(r => r.id === a.dataset.party)); });
+  }
+
+  function partyForm(pt) {
+    const r = pt || { party_type: 'consignee', active: true };
+    const body = openModal(pt ? `Edit ${pt.name}` : 'Add Customer or Vendor', `
+      <form id="party-form">
+        <div class="field"><label for="p-name">Name</label>
+          <input id="p-name" value="${esc(r.name || '')}" required maxlength="120"></div>
+        <div class="field"><label for="p-type">Type</label>
+          <select id="p-type">${Object.entries(PARTY_TYPES).map(([k, v]) => `<option value="${k}" ${r.party_type === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="field"><label for="p-a1">Address</label><input id="p-a1" value="${esc(r.address_line1 || '')}" maxlength="120"></div>
+        <div class="field"><label for="p-a2">Address line 2</label><input id="p-a2" value="${esc(r.address_line2 || '')}" maxlength="120"></div>
+        <div class="grid2">
+          <div class="field"><label for="p-city">City</label><input id="p-city" value="${esc(r.city || '')}" maxlength="60"></div>
+          <div class="field"><label for="p-state">State</label><input id="p-state" value="${esc(r.state || '')}" maxlength="2"></div>
+          <div class="field"><label for="p-zip">ZIP</label><input id="p-zip" value="${esc(r.zip || '')}" maxlength="10"></div>
+          <div class="field"><label for="p-contact">Contact</label><input id="p-contact" value="${esc(r.contact_name || '')}" maxlength="80"></div>
+          <div class="field"><label for="p-phone">Phone</label><input id="p-phone" type="tel" value="${esc(r.phone || '')}" maxlength="30"></div>
+          <div class="field"><label for="p-email">Email</label><input id="p-email" type="email" value="${esc(r.email || '')}" maxlength="120"></div>
+        </div>
+        <div class="field"><label for="p-notes">Notes (dock hours, appointment rules)</label><input id="p-notes" value="${esc(r.notes || '')}" maxlength="300"></div>
+        <div class="field"><label class="check"><input type="checkbox" id="p-active" ${r.active ? 'checked' : ''}> Active</label></div>
+        <button class="btn block" id="party-save">${pt ? 'Save' : 'Add'}</button>
+      </form>`);
+    $('#party-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#party-save', body), async () => {
+        const row = {
+          name: $('#p-name', body).value.trim(),
+          party_type: $('#p-type', body).value,
+          address_line1: strOrNull($('#p-a1', body).value), address_line2: strOrNull($('#p-a2', body).value),
+          city: strOrNull($('#p-city', body).value), state: strOrNull($('#p-state', body).value.toUpperCase()),
+          zip: strOrNull($('#p-zip', body).value), contact_name: strOrNull($('#p-contact', body).value),
+          phone: strOrNull($('#p-phone', body).value), email: strOrNull($('#p-email', body).value),
+          notes: strOrNull($('#p-notes', body).value), active: $('#p-active', body).checked
+        };
+        if (pt) await q(sb.from('parties').update(row).eq('id', pt.id));
+        else await q(sb.from('parties').insert(row));
+        toast(`${row.name} saved.`);
+        closeModal();
+        viewSetup('parties');
+      });
+    };
+  }
+
   async function setupCompany(out) {
     const s = S.settings || {};
     const hasPallets = (await q(sb.from('pallets').select('id', { count: 'exact', head: true })
@@ -1030,6 +1179,24 @@
             <div class="hint">${hasPallets ? 'Locked: pallets have already been received.' : 'Example: ' + esc((s.lp_prefix || 'LP') + '000001')}</div></div>
           <div class="field"><label for="c-uom">Default unit of measure</label><input id="c-uom" value="${esc(s.default_uom || 'EA')}" maxlength="10"></div>
         </div>
+
+        <h2 style="margin-top:18px">Pallet Identifiers</h2>
+        <p class="muted small">Rename the fields to match the customer's paperwork. Extra identifiers only show up once they have a name.</p>
+        <div class="grid2">
+          <div class="field"><label for="c-lotlbl">Lot field name</label>
+            <input id="c-lotlbl" value="${esc(s.lot_label || 'Lot / Production #')}" maxlength="30" required>
+            <div class="hint">Example: BIN Class. Required or optional is set per item.</div></div>
+          <div class="field"><label for="c-custlbl">Customer pallet ID name</label>
+            <input id="c-custlbl" value="${esc(s.cust_pallet_label || 'Customer Pallet ID')}" maxlength="30" required>
+            <label class="check" style="margin-top:6px"><input type="checkbox" id="c-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label></div>
+          ${[1, 2].map(n => `
+          <div class="field"><label for="c-ref${n}">Extra identifier ${n} name</label>
+            <input id="c-ref${n}" value="${esc(s['ref' + n + '_label'] || '')}" maxlength="30" placeholder="Leave blank to hide">
+            <div class="row" style="margin-top:6px">
+              <label class="check"><input type="checkbox" id="c-ref${n}req" ${s['ref' + n + '_required'] ? 'checked' : ''}> Required</label>
+              <label class="check"><input type="checkbox" id="c-ref${n}uniq" ${s['ref' + n + '_unique'] ? 'checked' : ''}> Unique per pallet</label>
+            </div></div>`).join('')}
+        </div>
         <button class="btn block" id="co-save">Save</button>
       </form>`;
     $('#co-form', out).onsubmit = e => {
@@ -1040,8 +1207,16 @@
           address_line1: strOrNull($('#c-a1', out).value), address_line2: strOrNull($('#c-a2', out).value),
           city: strOrNull($('#c-city', out).value), state: strOrNull($('#c-state', out).value.toUpperCase()),
           zip: strOrNull($('#c-zip', out).value), phone: strOrNull($('#c-phone', out).value),
-          default_uom: $('#c-uom', out).value.trim().toUpperCase() || 'EA'
+          default_uom: $('#c-uom', out).value.trim().toUpperCase() || 'EA',
+          lot_label: $('#c-lotlbl', out).value.trim() || 'Lot / Production #',
+          cust_pallet_label: $('#c-custlbl', out).value.trim() || 'Customer Pallet ID',
+          cust_pallet_required: $('#c-custreq', out).checked
         };
+        for (const n of [1, 2]) {
+          row['ref' + n + '_label'] = strOrNull($('#c-ref' + n, out).value);
+          row['ref' + n + '_required'] = $('#c-ref' + n + 'req', out).checked;
+          row['ref' + n + '_unique'] = $('#c-ref' + n + 'uniq', out).checked;
+        }
         if (!hasPallets) row.lp_prefix = $('#c-prefix', out).value.trim().toUpperCase();
         await q(sb.from('settings').update(row).eq('id', 1));
         toast('Company info saved.');

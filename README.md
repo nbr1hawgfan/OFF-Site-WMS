@@ -3,9 +3,14 @@
 Mobile-first warehouse app for RMB Logistics. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.1.0 includes:** sign-in, receiving (receipts, pallets, 4x6 labels, printed
+**v0.2.0 includes:** sign-in, receiving (receipts, pallets, 4x6 labels, printed
 receipt), inventory lookup (scan or search, move, adjust, hold), and setup
-(items, locations, company info).
+(items, locations, customers & vendors, company info, pallet identifiers).
+
+> **Upgrading from v0.1:** run `supabase/migrations/004_identifiers.sql` in the
+> Supabase SQL Editor **before** publishing v0.2. The database change is safe to
+> run while v0.1 is still live.
+
 **Coming next:** shipping and BOLs.
 
 ## Files
@@ -50,6 +55,32 @@ To deactivate someone: `update app_users set active = false where full_name = '.
 | operator | + create receipts, receive, move pallets, void pallets on open receipts, close receipts |
 | manager | + setup (items, locations), adjust qty, hold/release, reopen/void receipts, void any unshipped pallet |
 | admin | + company info |
+
+## Pallet identifiers
+
+Every pallet gets a **WMS Pallet ID** (e.g. RMB000123), plus up to four
+identifiers you name in **Setup > Company > Pallet Identifiers**:
+
+| Field | Default name | Example (One Source style) | Rules |
+|---|---|---|---|
+| Lot | Lot / Production # | BIN Class (714) | Required or optional per item |
+| Customer pallet ID | Customer Pallet ID | Pallet ID | Always unique; can be required |
+| Extra identifier 1 | *(hidden)* | PGID | Optional, required, and/or unique |
+| Extra identifier 2 | *(hidden)* | *(hidden)* | Optional, required, and/or unique |
+
+- **Visible fields:** an extra identifier only appears once it has a name.
+- **Unique values:** no two active pallets can share one. A voided pallet frees
+  its value.
+- **Scanning:** all identifiers are scannable, print on labels and receipts, and
+  work in Lookup.
+- **Handheld scanners:** scan into the first identifier and each Enter moves to
+  the next field. The last Enter receives the pallet.
+
+## Customers & vendors
+
+**Setup > Customers** stores vendors (ship-from) and customers (ship-to). Saved
+vendors, and any vendor names typed on past receipts, are suggested on new
+receipts. Customers will fill in the ship-to on shipments and BOLs.
 
 ## Printing
 

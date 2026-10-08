@@ -44,24 +44,36 @@ const WmsPrint = (() => {
     setTimeout(() => window.print(), 150);
   }
 
-  /* pallets: [{ lp_id, customer_pallet_id, lot_number, qty, uom, sku, description,
+  // identifier labels configured in Company setup
+  function idDefs(settings) {
+    const st = settings || {};
+    const out = [{ field: 'customer_pallet_id', label: st.cust_pallet_label || 'Customer Pallet ID' }];
+    if (st.ref1_label) out.push({ field: 'ref1', label: st.ref1_label });
+    if (st.ref2_label) out.push({ field: 'ref2', label: st.ref2_label });
+    return out;
+  }
+  const lotLabel = st => (st && st.lot_label) || 'Lot / Production #';
+
+  /* pallets: [{ lp_id, customer_pallet_id, ref1, ref2, lot_number, qty, uom, sku, description,
                  production_date, expiration_date, received_at, receipt_no }] */
   function labels(pallets, settings, copies = 1) {
     const company = esc((settings?.company_name || '').replace(/_/g, ' '));
+    const ids = idDefs(settings);
     const one = p => `
       <section class="lbl">
         <div class="lbl-top"><span>${company}</span><span>${esc(fmtDate(p.received_at))}</span></div>
-        <div class="lbl-caption">PALLET ID</div>
+        <div class="lbl-caption">WMS PALLET ID</div>
         <div class="lbl-lp">${esc(p.lp_id)}</div>
         <svg class="bc lbl-bc" data-value="${esc(p.lp_id)}" data-h="90"></svg>
         <div class="lbl-sku">${esc(p.sku)}</div>
         <div class="lbl-desc">${esc(p.description)}</div>
         <div class="lbl-grid">
-          <div><div class="lbl-caption">LOT / PROD #</div><div class="lbl-val">${esc(p.lot_number || '-')}</div></div>
+          <div><div class="lbl-caption">${esc(lotLabel(settings).toUpperCase())}</div><div class="lbl-val">${esc(p.lot_number || '-')}</div></div>
           <div class="right"><div class="lbl-caption">QTY</div><div class="lbl-val big">${esc(fmtQty(p.qty))} <small>${esc(p.uom)}</small></div></div>
         </div>
         ${p.lot_number ? `<svg class="bc lbl-bc-sm" data-value="${esc(p.lot_number)}" data-h="40"></svg>` : ''}
-        ${p.customer_pallet_id ? `<div class="lbl-cust"><span class="lbl-caption">CUSTOMER PALLET</span> ${esc(p.customer_pallet_id)}</div>` : ''}
+        ${ids.filter(d => p[d.field]).map(d =>
+          `<div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('')}
         ${(p.production_date || p.expiration_date) ? `<div class="lbl-dates">
             ${p.production_date ? `Prod: ${esc(fmtDate(p.production_date))}` : ''}
             ${p.expiration_date ? `&nbsp;&nbsp;Exp: ${esc(fmtDate(p.expiration_date))}` : ''}</div>` : ''}
@@ -91,7 +103,7 @@ const WmsPrint = (() => {
         .lbl-val { font-size: 20pt; font-weight: 800; }
         .lbl-val.big { font-size: 28pt; }
         .lbl-val small { font-size: 12pt; }
-        .lbl-cust { font-size: 13pt; font-weight: 700; margin-top: 6pt; }
+        .lbl-cust { font-size: 13pt; font-weight: 700; margin-top: 4pt; }
         .lbl-dates { font-size: 11pt; margin-top: 3pt; }
         .lbl-foot { font-size: 10pt; margin-top: 5pt; border-top: 1pt solid #000; padding-top: 3pt; }
       </style>`;
@@ -112,6 +124,8 @@ const WmsPrint = (() => {
       totals[k] = totals[k] || { sku: p.sku, description: p.description, lot: p.lot_number, uom: p.uom, pallets: 0, qty: 0 };
       totals[k].pallets += 1; totals[k].qty += Number(p.qty_received);
     }
+    // only print identifier columns that have data on this receipt
+    const usedIds = idDefs(s).filter(d => pallets.some(p => p[d.field]));
     const totalRows = Object.values(totals).sort((a, b) => (a.sku + a.lot).localeCompare(b.sku + b.lot));
     const totalQty = pallets.reduce((a, p) => a + Number(p.qty_received), 0);
     const uoms = [...new Set(pallets.map(p => p.uom))];
@@ -161,7 +175,7 @@ const WmsPrint = (() => {
 
         <h2>Summary</h2>
         <table>
-          <thead><tr><th>SKU</th><th>Description</th><th>Lot / Prod #</th><th class="num">Pallets</th><th class="num">Qty</th><th>UOM</th></tr></thead>
+          <thead><tr><th>SKU</th><th>Description</th><th>${esc(lotLabel(s))}</th><th class="num">Pallets</th><th class="num">Qty</th><th>UOM</th></tr></thead>
           <tbody>${totalRows.map(t => `<tr><td>${esc(t.sku)}</td><td>${esc(t.description)}</td><td>${esc(t.lot || '')}</td>
             <td class="num">${t.pallets}</td><td class="num">${esc(fmtQty(t.qty))}</td><td>${esc(t.uom)}</td></tr>`).join('')}</tbody>
           <tfoot><tr><td colspan="3">Total</td><td class="num">${pallets.length}</td><td class="num">${totalCell}</td><td>${totalUom}</td></tr></tfoot>
@@ -169,8 +183,8 @@ const WmsPrint = (() => {
 
         <h2>Pallet Detail</h2>
         <table>
-          <thead><tr><th>Pallet ID</th><th>Cust. Pallet</th><th>SKU</th><th>Lot / Prod #</th><th class="num">Qty</th><th>Location</th></tr></thead>
-          <tbody>${pallets.map(p => `<tr><td class="mono">${esc(p.lp_id)}</td><td>${esc(p.customer_pallet_id || '')}</td>
+          <thead><tr><th>WMS Pallet ID</th>${usedIds.map(d => `<th>${esc(d.label)}</th>`).join('')}<th>SKU</th><th>${esc(lotLabel(s))}</th><th class="num">Qty</th><th>Location</th></tr></thead>
+          <tbody>${pallets.map(p => `<tr><td class="mono">${esc(p.lp_id)}</td>${usedIds.map(d => `<td>${esc(p[d.field] || '')}</td>`).join('')}
             <td>${esc(p.sku)}</td><td>${esc(p.lot_number || '')}</td><td class="num">${esc(fmtQty(p.qty_received))}</td>
             <td>${esc(p.location || '')}</td></tr>`).join('')}</tbody>
         </table>
