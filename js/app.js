@@ -277,6 +277,9 @@
       if (a === 'receipt' && b === 'new') return viewNewReceipt();
       if (a === 'receipt' && b) return viewReceipt(b);
       if (a === 'lookup') return viewLookup(decodeURIComponent(b || ''));
+      if (a === 'shipments') return viewShipments();
+      if (a === 'shipment' && b === 'new') return viewNewShipment();
+      if (a === 'shipment' && b) return viewShipment(b);
       if (a === 'setup') return viewSetup(b || 'items');
       render(`<div class="card"><h2>Page not found</h2><a class="btn" href="#/">Home</a></div>`);
     } catch (e) {
@@ -371,9 +374,12 @@
   async function viewHome() {
     const mySeq = navSeq;
     render(`<div class="loading">Loading...</div>`);
-    const [openCount, onHand] = await Promise.all([
-      q(sb.from('receipts').select('id', { count: 'exact', head: true }).eq('status', 'open').then(r => ({ data: r.count, error: r.error }))),
-      q(sb.from('v_inventory_by_lot').select('pallets'))
+    const countOpen = table => q(sb.from(table).select('id', { count: 'exact', head: true }).eq('status', 'open')
+      .then(r => ({ data: r.count, error: r.error })));
+    const [openCount, onHand, openShip] = await Promise.all([
+      countOpen('receipts'),
+      q(sb.from('v_inventory_by_lot').select('pallets')),
+      countOpen('shipments')
     ]);
     if (mySeq !== navSeq) return;
     const pallets = onHand.reduce((a, r) => a + Number(r.pallets), 0);
@@ -384,8 +390,9 @@
           <span>${openCount ? `${openCount} open receipt${openCount === 1 ? '' : 's'}` : 'Receive pallets, print labels'}</span></a>
         <a class="tile" href="#/lookup"><strong>Inventory Lookup</strong>
           <span>${pallets.toLocaleString()} pallet${pallets === 1 ? '' : 's'} on hand</span></a>
-        ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, company info</span></a>` : ''}
-        <div class="tile" style="opacity:.55"><strong>Shipping</strong><span>Coming next</span></div>
+        <a class="tile" href="#/shipments"><strong>Shipping</strong>
+          <span>${openShip ? `${openShip} open shipment${openShip === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
+        ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, company info</span></a>` : ''}
       </div>
       <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
   }
@@ -975,6 +982,346 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* shipping: list                                                      */
+  /* ------------------------------------------------------------------ */
+  const FREIGHT_TERMS = { prepaid: 'Prepaid', collect: 'Collect', third_party: '3rd Party' };
+  function fmtTime(t) {
+    if (!t) return '';
+    const [h, m] = String(t).split(':').map(Number);
+    const d = new Date(); d.setHours(h, m, 0, 0);
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function viewShipments() {
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.from('shipments')
+      .select('id, shipment_no, status, ship_date, appt_time, ship_to_name, ship_to_city, ship_to_state, carrier, customer_order_no, po_number, shipment_lines(count)')
+      .order('ship_date', { ascending: false }).order('shipment_no', { ascending: false }).limit(60));
+    if (mySeq !== navSeq) return;
+    const open = rows.filter(r => r.status === 'open').sort((a, b) =>
+      (a.ship_date + (a.appt_time || '')).localeCompare(b.ship_date + (b.appt_time || '')));
+    const rest = rows.filter(r => r.status !== 'open');
+    const item = r => `
+      <a class="list-item" href="#/shipment/${r.id}">
+        <div class="row spread"><span class="title">${esc(r.shipment_no)}</span>${badge(r.status)}</div>
+        <div><strong>${esc(r.ship_to_name || 'No ship-to yet')}</strong>${r.ship_to_city ? ' &middot; ' + esc([r.ship_to_city, r.ship_to_state].filter(Boolean).join(', ')) : ''}</div>
+        <div class="meta">${esc(fmtDate(r.ship_date))}${r.appt_time ? ' at ' + esc(fmtTime(r.appt_time)) : ''} &middot; ${r.shipment_lines?.[0]?.count ?? 0} pallets</div>
+        <div class="meta">${esc([r.carrier, r.customer_order_no && 'Order ' + r.customer_order_no, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
+      </a>`;
+    render(`
+      <a class="back" href="#/">&larr; Home</a>
+      <div class="row spread"><h1>Shipping</h1>
+        ${can('operator') ? `<a class="btn" href="#/shipment/new">New Shipment</a>` : ''}</div>
+      <h2>Open</h2>
+      ${open.length ? `<div class="list">${open.map(item).join('')}</div>` : `<p class="muted">No open shipments.</p>`}
+      <h2 style="margin-top:20px">Recent</h2>
+      ${rest.length ? `<div class="list">${rest.map(item).join('')}</div>` : `<p class="muted">Nothing yet.</p>`}`);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* shipping: header form                                               */
+  /* ------------------------------------------------------------------ */
+  function shipmentHeaderFields(r = {}) {
+    const customers = S.parties.filter(p => p.active && p.party_type !== 'vendor');
+    const terms = r.freight_terms || 'prepaid';
+    return `
+      <div class="field"><label for="consignee_id">Customer / Ship-to</label>
+        <select id="consignee_id">
+          <option value="">${customers.length ? 'Select a saved customer, or type the address below' : 'Type the address below'}</option>
+          ${customers.map(c => `<option value="${c.id}" ${r.consignee_id === c.id ? 'selected' : ''}>${esc(c.name)}${c.city ? ' — ' + esc(c.city) : ''}</option>`).join('')}
+        </select>
+        ${can('manager') ? '<div class="hint">Save customers in Setup &gt; Customers.</div>' : ''}</div>
+      <div class="field"><label for="ship_to_name">Ship-to name</label>
+        <input id="ship_to_name" value="${esc(r.ship_to_name || '')}" maxlength="120" required></div>
+      <div class="field"><label for="ship_to_address1">Address</label>
+        <input id="ship_to_address1" value="${esc(r.ship_to_address1 || '')}" maxlength="120"></div>
+      <div class="field"><label for="ship_to_address2">Address line 2</label>
+        <input id="ship_to_address2" value="${esc(r.ship_to_address2 || '')}" maxlength="120"></div>
+      <div class="grid2">
+        <div class="field"><label for="ship_to_city">City</label><input id="ship_to_city" value="${esc(r.ship_to_city || '')}" maxlength="60"></div>
+        <div class="field"><label for="ship_to_state">State</label><input id="ship_to_state" value="${esc(r.ship_to_state || '')}" maxlength="2"></div>
+        <div class="field"><label for="ship_to_zip">ZIP</label><input id="ship_to_zip" value="${esc(r.ship_to_zip || '')}" maxlength="10"></div>
+        <div class="field"><label for="ship_to_contact">Contact</label><input id="ship_to_contact" value="${esc(r.ship_to_contact || '')}" maxlength="80"></div>
+        <div class="field"><label for="ship_to_phone">Phone</label><input id="ship_to_phone" type="tel" value="${esc(r.ship_to_phone || '')}" maxlength="30"></div>
+      </div>
+      <h3 style="margin-top:8px">Pickup</h3>
+      <div class="grid2">
+        <div class="field"><label for="ship_date">Ship date</label>
+          <input id="ship_date" type="date" value="${esc(r.ship_date || toLocalInput().slice(0, 10))}" required></div>
+        <div class="field"><label for="appt_time">Appointment time</label>
+          <input id="appt_time" type="time" value="${esc((r.appt_time || '').slice(0, 5))}"></div>
+        <div class="field"><label for="carrier">Carrier</label><input id="carrier" value="${esc(r.carrier || '')}" maxlength="120"></div>
+        <div class="field"><label for="carrier_scac">SCAC</label><input id="carrier_scac" value="${esc(r.carrier_scac || '')}" maxlength="4"></div>
+        <div class="field"><label for="trailer_no">Trailer #</label><input id="trailer_no" value="${esc(r.trailer_no || '')}" maxlength="40"></div>
+        <div class="field"><label for="seal_no">Seal #</label><input id="seal_no" value="${esc(r.seal_no || '')}" maxlength="40"></div>
+        <div class="field"><label for="pro_number">PRO #</label><input id="pro_number" value="${esc(r.pro_number || '')}" maxlength="40"></div>
+        <div class="field"><label for="freight_terms">Freight terms</label>
+          <select id="freight_terms">${Object.entries(FREIGHT_TERMS).map(([k, v]) => `<option value="${k}" ${terms === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+      </div>
+      <div class="field" id="tp-wrap" ${terms === 'third_party' ? '' : 'hidden'}><label for="third_party_bill_to">3rd party bill-to</label>
+        <textarea id="third_party_bill_to" maxlength="400" placeholder="Name and address">${esc(r.third_party_bill_to || '')}</textarea></div>
+      <h3 style="margin-top:8px">Order</h3>
+      <div class="grid2">
+        <div class="field"><label for="customer_order_no">Customer order #</label><input id="customer_order_no" value="${esc(r.customer_order_no || '')}" maxlength="60"></div>
+        <div class="field"><label for="po_number">PO #</label><input id="po_number" value="${esc(r.po_number || '')}" maxlength="60"></div>
+      </div>
+      <div class="field"><label for="special_instructions">Special instructions (prints on BOL)</label>
+        <textarea id="special_instructions" maxlength="600">${esc(r.special_instructions || '')}</textarea></div>
+      <div class="field"><label for="notes">Internal notes</label>
+        <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>`;
+  }
+
+  function wireShipmentHeader(root) {
+    $('#consignee_id', root).addEventListener('change', e => {
+      const c = S.parties.find(p => p.id === e.target.value);
+      if (!c) return;
+      const set = (id, v) => { $('#' + id, root).value = v || ''; };
+      set('ship_to_name', c.name); set('ship_to_address1', c.address_line1); set('ship_to_address2', c.address_line2);
+      set('ship_to_city', c.city); set('ship_to_state', c.state); set('ship_to_zip', c.zip);
+      set('ship_to_contact', c.contact_name); set('ship_to_phone', c.phone);
+      if (c.notes && !$('#special_instructions', root).value) set('special_instructions', c.notes);
+    });
+    $('#freight_terms', root).addEventListener('change', e => {
+      $('#tp-wrap', root).hidden = e.target.value !== 'third_party';
+    });
+  }
+
+  function readShipmentHeader(root) {
+    const v = id => $('#' + id, root).value;
+    return {
+      consignee_id: v('consignee_id') || null,
+      ship_to_name: strOrNull(v('ship_to_name')),
+      ship_to_address1: strOrNull(v('ship_to_address1')), ship_to_address2: strOrNull(v('ship_to_address2')),
+      ship_to_city: strOrNull(v('ship_to_city')), ship_to_state: strOrNull(v('ship_to_state').toUpperCase()),
+      ship_to_zip: strOrNull(v('ship_to_zip')), ship_to_contact: strOrNull(v('ship_to_contact')),
+      ship_to_phone: strOrNull(v('ship_to_phone')),
+      ship_date: v('ship_date'), appt_time: v('appt_time') || null,
+      carrier: strOrNull(v('carrier')), carrier_scac: strOrNull(v('carrier_scac').toUpperCase()),
+      trailer_no: strOrNull(v('trailer_no')), seal_no: strOrNull(v('seal_no')), pro_number: strOrNull(v('pro_number')),
+      freight_terms: v('freight_terms'),
+      third_party_bill_to: v('freight_terms') === 'third_party' ? strOrNull(v('third_party_bill_to')) : null,
+      customer_order_no: strOrNull(v('customer_order_no')), po_number: strOrNull(v('po_number')),
+      special_instructions: strOrNull(v('special_instructions')), notes: strOrNull(v('notes'))
+    };
+  }
+
+  function viewNewShipment() {
+    if (!can('operator')) { location.hash = '#/shipments'; return; }
+    render(`
+      <a class="back" href="#/shipments">&larr; Shipping</a>
+      <h1>New Shipment</h1>
+      <form id="new-ship" class="card accent">
+        ${shipmentHeaderFields()}
+        <button class="btn block" id="create-ship">Create Shipment</button>
+      </form>`);
+    const form = $('#new-ship');
+    wireShipmentHeader(form);
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy($('#create-ship'), async () => {
+        const row = await q(sb.from('shipments').insert(readShipmentHeader(form)).select('id, shipment_no').single());
+        toast(`${row.shipment_no} created.`);
+        location.hash = '#/shipment/' + row.id;
+      });
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* shipping: detail, load pallets, ship                                */
+  /* ------------------------------------------------------------------ */
+  function shipTotals(lines) {
+    const tare = Number(S.settings?.pallet_tare_lbs || 0);
+    const pallets = new Set(lines.map(l => l.pallet_id)).size;
+    const byUom = {};
+    for (const l of lines) byUom[l.uom] = (byUom[l.uom] || 0) + Number(l.qty);
+    const product = lines.reduce((a, l) => a + Number(l.product_weight_lbs || 0), 0);
+    const missingWeight = lines.some(l => l.unit_weight_lbs === null || l.unit_weight_lbs === undefined);
+    return { pallets, byUom, weight: product + tare * pallets, missingWeight };
+  }
+
+  async function viewShipment(id, focusScan) {
+    const mySeq = navSeq;
+    if (!document.querySelector('#ship-page')) render(`<div class="loading">Loading...</div>`);
+    const [ship, lines] = await Promise.all([
+      q(sb.from('shipments').select('*').eq('id', id).single()),
+      q(sb.from('v_shipment_detail').select('*').eq('shipment_id', id).order('created_at'))
+    ]);
+    if (mySeq !== navSeq) return;
+    const isOpen = ship.status === 'open';
+    const editable = isOpen && can('operator');
+    const t = shipTotals(lines);
+    const qtyText = Object.entries(t.byUom).map(([u, n]) => `${fmtQty(n)} ${u}`).join(' + ');
+    const activeItems = S.items.filter(i => i.active);
+
+    const headerView = `
+      <dl class="kv">
+        <dt>Ship to</dt><dd>${esc(ship.ship_to_name || '-')}<br><span class="muted small">${esc([ship.ship_to_address1, ship.ship_to_address2, [ship.ship_to_city, ship.ship_to_state].filter(Boolean).join(', '), ship.ship_to_zip].filter(Boolean).join(' · '))}</span></dd>
+        <dt>Ship date</dt><dd>${esc(fmtDate(ship.ship_date))}${ship.appt_time ? ' at ' + esc(fmtTime(ship.appt_time)) : ''}</dd>
+        <dt>Carrier</dt><dd>${esc([ship.carrier, ship.carrier_scac].filter(Boolean).join(' / ') || '-')}</dd>
+        <dt>Trailer / Seal</dt><dd>${esc([ship.trailer_no, ship.seal_no].filter(Boolean).join(' / ') || '-')}</dd>
+        <dt>PRO #</dt><dd>${esc(ship.pro_number || '-')}</dd>
+        <dt>Freight terms</dt><dd>${esc(FREIGHT_TERMS[ship.freight_terms] || ship.freight_terms)}</dd>
+        <dt>Order / PO</dt><dd>${esc([ship.customer_order_no, ship.po_number].filter(Boolean).join(' / ') || '-')}</dd>
+        ${ship.special_instructions ? `<dt>Instructions</dt><dd>${esc(ship.special_instructions)}</dd>` : ''}
+        ${ship.shipped_at ? `<dt>Shipped</dt><dd>${esc(fmtDateTime(ship.shipped_at))}</dd>` : ''}
+        ${ship.status === 'void' ? `<dt>Void reason</dt><dd>${esc(ship.void_reason || '')}</dd>` : ''}
+      </dl>`;
+
+    const lineRow = l => `
+      <div class="list-item pallet">
+        <div>
+          <div class="lp">${esc(l.lp_id)}</div>
+          <div><strong>${esc(l.sku)}</strong> &middot; ${lotText(l)}</div>
+          <div class="meta">${esc(l.location || '')}${!isOpen ? '' : Number(l.qty) < Number(l.qty_on_hand) ? ` &middot; partial: ${esc(fmtQty(l.qty))} of ${esc(fmtQty(l.qty_on_hand))}` : ''}</div>
+          ${idText(l) ? `<div class="meta">${idText(l)}</div>` : ''}
+        </div>
+        <div class="qty">${esc(fmtQty(l.qty))}<div class="meta">${esc(l.uom)}</div></div>
+        ${editable ? `<div class="row" style="grid-column:1/-1"><button class="btn sm danger" data-remove="${l.pallet_id}">Remove</button></div>` : ''}
+      </div>`;
+
+    render(`
+      <div id="ship-page">
+        <a class="back" href="#/shipments">&larr; Shipping</a>
+        <div class="row spread"><h1>${esc(ship.shipment_no)}</h1>${badge(ship.status)}</div>
+
+        <div class="card">
+          ${editable ? `
+            <details ${lines.length ? '' : 'open'}><summary class="row spread" style="cursor:pointer">
+              <h2 style="margin:0">Shipment Details</h2>
+              <span class="muted small">${esc([ship.ship_to_name, fmtDate(ship.ship_date)].filter(Boolean).join(' · ') || 'tap to edit')}</span></summary>
+              <form id="ship-hdr" style="margin-top:12px">${shipmentHeaderFields(ship)}
+                <button class="btn secondary block" id="ship-hdr-save">Save Shipment Details</button></form>
+            </details>` : `<h2>Shipment Details</h2>${headerView}`}
+        </div>
+
+        ${editable ? `
+        <form id="scan-form" class="card accent" autocomplete="off">
+          <h2>Load Pallets</h2>
+          <label for="sc">Scan any pallet ID</label>
+          <div class="input-scan"><input id="sc" enterkeyhint="go">${scanBtn('sc', 'scan-form')}</div>
+          <div class="grid2" style="margin-top:10px">
+            <div class="field"><label for="sc-qty">Qty <span class="muted small">(blank = whole pallet)</span></label>
+              <input id="sc-qty" type="number" inputmode="decimal" min="0.01" step="any"></div>
+            <div class="field" style="display:flex;align-items:flex-end"><button class="btn block" id="sc-btn">Add to Shipment</button></div>
+          </div>
+          <details class="more" id="pick-details"><summary>Pick by item (oldest first)</summary>
+            <select id="pick-item"><option value="">Select item...</option>
+              ${activeItems.map(i => `<option value="${i.id}">${esc(i.sku)} — ${esc(i.description)}</option>`).join('')}</select>
+            <div id="pick-list" style="margin-top:10px"></div>
+          </details>
+        </form>` : ''}
+
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Pallets</h2>
+            <span class="muted">${t.pallets} pallet${t.pallets === 1 ? '' : 's'}${qtyText ? ' &middot; ' + esc(qtyText) : ''}${t.weight ? ' &middot; ' + esc(fmtQty(Math.round(t.weight))) + ' lbs' : ''}</span></div>
+          ${t.missingWeight && lines.length ? '<div class="notice warn" style="margin-top:10px">Some items have no unit weight, so the BOL weight will be low. Set weights in Setup &gt; Items.</div>' : ''}
+          <div style="margin-top:12px">${lines.length ? lines.map(lineRow).join('') : '<p class="muted">No pallets yet. Scan a pallet to add it.</p>'}</div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn dark" id="print-bol" ${lines.length ? '' : 'disabled'}>Print BOL</button>
+          ${editable ? `<button class="btn" id="ship-btn" ${lines.length ? '' : 'disabled'}>Ship</button>` : ''}
+          ${ship.status !== 'void' && can('manager') ? `<button class="btn danger" id="void-ship">Void Shipment</button>` : ''}
+        </div>
+      </div>`);
+
+    const page = $('#ship-page');
+    wireScanButtons(page);
+    const reload = focus => viewShipment(id, focus);
+
+    const hdr = $('#ship-hdr', page);
+    if (hdr) {
+      wireShipmentHeader(hdr);
+      hdr.onsubmit = e => {
+        e.preventDefault();
+        busy($('#ship-hdr-save'), async () => {
+          await q(sb.from('shipments').update(readShipmentHeader(hdr)).eq('id', id));
+          toast('Shipment details saved.');
+          await reload();
+        });
+      };
+    }
+
+    const scanForm = $('#scan-form', page);
+    if (scanForm) {
+      if (focusScan) setTimeout(() => $('#sc')?.focus(), 30);
+      scanForm.onsubmit = e => {
+        e.preventDefault();
+        busy($('#sc-btn', scanForm), async () => {
+          const code = $('#sc', scanForm).value.trim();
+          if (!code) { $('#sc', scanForm).focus(); throw new Error('Scan or type a pallet ID.'); }
+          const qty = numOrNull($('#sc-qty', scanForm).value);
+          const found = await q(sb.rpc('wms_find_pallet', { p_code: code }));
+          if (!found.length) throw new Error(`No pallet in stock matches "${code}".`);
+          if (found.length > 1) throw new Error(`"${code}" matches ${found.length} pallets. Scan the WMS pallet ID instead.`);
+          const p = found[0];
+          const line = await q(sb.rpc('wms_add_to_shipment', { p_shipment_id: id, p_pallet_id: p.pallet_id, p_qty: qty }));
+          toast(`Added ${p.lp_id}: ${fmtQty(line.qty)} ${p.uom}.`);
+          await reload(true);
+        });
+      };
+      $('#pick-item', scanForm).addEventListener('change', async e => {
+        const out = $('#pick-list', scanForm);
+        if (!e.target.value) { out.innerHTML = ''; return; }
+        out.innerHTML = '<div class="muted">Loading...</div>';
+        try {
+          const onShip = new Set(lines.map(l => l.pallet_id));
+          const rows = (await q(sb.from('v_inventory').select('*').eq('item_id', e.target.value)
+            .order('received_at').order('lp_id').limit(100)))
+            .filter(r => r.status === 'on_hand' && Number(r.qty_available) > 0 && !onShip.has(r.pallet_id));
+          out.innerHTML = rows.length ? rows.map(r => `
+            <div class="list-item row spread">
+              <div><div class="lp" style="font-family:monospace;font-weight:800">${esc(r.lp_id)}</div>
+                <div class="meta">${lotText(r)} &middot; ${esc(r.location || '')} &middot; Rcvd ${esc(fmtDate(r.received_at))}</div>
+                ${idText(r) ? `<div class="meta">${idText(r)}</div>` : ''}</div>
+              <div style="text-align:right"><strong>${esc(fmtQty(r.qty_available))}</strong> ${esc(r.uom)}
+                <div><button type="button" class="btn sm" data-pick="${r.pallet_id}">Add</button></div></div>
+            </div>`).join('') : '<p class="muted">No available pallets for this item.</p>';
+          $$('[data-pick]', out).forEach(b => b.onclick = () => busy(b, async () => {
+            const r = rows.find(x => x.pallet_id === b.dataset.pick);
+            const line = await q(sb.rpc('wms_add_to_shipment', { p_shipment_id: id, p_pallet_id: r.pallet_id, p_qty: null }));
+            toast(`Added ${r.lp_id}: ${fmtQty(line.qty)} ${r.uom}.`);
+            await reload();
+          }));
+        } catch (err) { out.innerHTML = `<div class="notice bad">${esc(friendly(err))}</div>`; }
+      });
+    }
+
+    $$('[data-remove]', page).forEach(b => b.onclick = () => busy(b, async () => {
+      await q(sb.rpc('wms_remove_from_shipment', { p_shipment_id: id, p_pallet_id: b.dataset.remove }));
+      toast('Pallet removed.');
+      await reload();
+    }));
+
+    $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, S.settings);
+
+    $('#ship-btn', page)?.addEventListener('click', async () => {
+      if (!ship.ship_to_name) { toast('Add the ship-to before shipping.', 'bad'); return; }
+      const ok = await askConfirm(`Ship ${ship.shipment_no}?`,
+        `${t.pallets} pallet${t.pallets === 1 ? '' : 's'} (${esc(qtyText)}) to <strong>${esc(ship.ship_to_name)}</strong>. Inventory will be removed and the shipment locked.`, 'Ship');
+      if (!ok) return;
+      busy($('#ship-btn'), async () => {
+        await q(sb.rpc('wms_ship_shipment', { p_shipment_id: id }));
+        toast(`${ship.shipment_no} shipped.`);
+        await reload();
+      });
+    });
+
+    $('#void-ship', page)?.addEventListener('click', async () => {
+      const reason = await askReason(`Void ${ship.shipment_no}?`, ship.status === 'shipped'
+        ? 'This puts every pallet on this shipment back into inventory.'
+        : 'This releases the pallets on this shipment.', 'Void Shipment');
+      if (!reason) return;
+      busy(null, async () => {
+        await q(sb.rpc('wms_void_shipment', { p_shipment_id: id, p_reason: reason }));
+        toast(`${ship.shipment_no} voided.`);
+        await reload();
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* setup: items, locations, customers & vendors, company              */
   /* ------------------------------------------------------------------ */
   async function viewSetup(tab) {
@@ -1178,6 +1525,9 @@
             <input id="c-prefix" value="${esc(s.lp_prefix || '')}" maxlength="6" ${hasPallets ? 'readonly' : ''} required>
             <div class="hint">${hasPallets ? 'Locked: pallets have already been received.' : 'Example: ' + esc((s.lp_prefix || 'LP') + '000001')}</div></div>
           <div class="field"><label for="c-uom">Default unit of measure</label><input id="c-uom" value="${esc(s.default_uom || 'EA')}" maxlength="10"></div>
+          <div class="field"><label for="c-tare">Empty pallet weight (lbs)</label>
+            <input id="c-tare" type="number" inputmode="decimal" min="0" step="any" value="${esc(Number(s.pallet_tare_lbs || 0))}">
+            <div class="hint">Added per pallet to BOL weight. A wood pallet is typically 40-50 lbs.</div></div>
         </div>
 
         <h2 style="margin-top:18px">Pallet Identifiers</h2>
@@ -1208,6 +1558,7 @@
           city: strOrNull($('#c-city', out).value), state: strOrNull($('#c-state', out).value.toUpperCase()),
           zip: strOrNull($('#c-zip', out).value), phone: strOrNull($('#c-phone', out).value),
           default_uom: $('#c-uom', out).value.trim().toUpperCase() || 'EA',
+          pallet_tare_lbs: Number($('#c-tare', out).value) || 0,
           lot_label: $('#c-lotlbl', out).value.trim() || 'Lot / Production #',
           cust_pallet_label: $('#c-custlbl', out).value.trim() || 'Customer Pallet ID',
           cust_pallet_required: $('#c-custreq', out).checked

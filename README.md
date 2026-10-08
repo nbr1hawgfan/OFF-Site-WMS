@@ -3,15 +3,19 @@
 Mobile-first warehouse app for RMB Logistics. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.2.0 includes:** sign-in, receiving (receipts, pallets, 4x6 labels, printed
-receipt), inventory lookup (scan or search, move, adjust, hold), and setup
-(items, locations, customers & vendors, company info, pallet identifiers).
+**v0.3.0 includes:**
+- **Sign-in** with roles.
+- **Receiving:** receipts, pallets, 4x6 labels, printed receipt.
+- **Shipping:** scan or pick pallets, partial pallets, ship, BOL.
+- **Inventory lookup:** scan or search, move, adjust, hold.
+- **Setup:** items, locations, customers & vendors, company info, pallet
+  identifiers.
 
-> **Upgrading from v0.1:** run `supabase/migrations/004_identifiers.sql` in the
-> Supabase SQL Editor **before** publishing v0.2. The database change is safe to
-> run while v0.1 is still live.
+> **Database:** migrations 001–005 are all applied to Offsite WMS. When a new
+> migration ships, run it in the Supabase SQL Editor **before** publishing the
+> app files that need it.
 
-**Coming next:** shipping and BOLs.
+**Planned next:** daily load calendar (inbound and outbound).
 
 ## Files
 
@@ -75,6 +79,26 @@ identifiers you name in **Setup > Company > Pallet Identifiers**:
   work in Lookup.
 - **Handheld scanners:** scan into the first identifier and each Enter moves to
   the next field. The last Enter receives the pallet.
+
+## Shipping
+
+1. **New Shipment:** pick a saved customer to fill the ship-to and special
+   instructions, then set the date, appointment time, carrier, and freight terms.
+2. **Load pallets:** scan any pallet identifier (WMS, customer, or extra) to add
+   the whole pallet. Enter a qty first for a partial pallet. **Pick by item**
+   lists available pallets oldest first.
+3. **Print BOL:** page 1 is a straight bill of lading with weight, NMFC, and
+   class per item. Page 2 is the pallet detail.
+4. **Ship:** removes the inventory and locks the shipment. Partial pallets keep
+   their remainder in the same location.
+
+**How the BOL is filled in:**
+- **Weight:** qty times the item's unit weight, plus the empty pallet weight
+  (Setup > Company) for each pallet. Items with no weight show a warning.
+- **NMFC and class:** taken from each item (Setup > Items).
+
+**Voiding** a shipment (managers) releases the pallets if it's open, or puts
+everything back into inventory if it already shipped.
 
 ## Customers & vendors
 

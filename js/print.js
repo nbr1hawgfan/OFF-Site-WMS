@@ -197,5 +197,143 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.5in;');
   }
 
-  return { labels, receipt };
+  /* Straight bill of lading (letter). lines: v_shipment_detail rows */
+  function bol(ship, lines, settings) {
+    const s = settings || {};
+    const tare = Number(s.pallet_tare_lbs || 0);
+    const company = esc((s.company_name || '').replace(/_/g, ' '));
+    const fromAddr = [s.address_line1, s.address_line2, [s.city, s.state].filter(Boolean).join(', ') + (s.zip ? ' ' + s.zip : '')]
+      .filter(x => x && x.trim()).map(esc).join('<br>');
+    const toAddr = [ship.ship_to_address1, ship.ship_to_address2,
+      [ship.ship_to_city, ship.ship_to_state].filter(Boolean).join(', ') + (ship.ship_to_zip ? ' ' + ship.ship_to_zip : '')]
+      .filter(x => x && x.trim()).map(esc).join('<br>');
+    const fmtTimeStr = t => {
+      if (!t) return '';
+      const [h, m] = String(t).split(':').map(Number);
+      const d = new Date(); d.setHours(h, m, 0, 0);
+      return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    };
+    const box = on => `<span class="bx">${on ? '&#10003;' : '&nbsp;'}</span>`;
+
+    // carrier lines: one per item (freight class / NMFC are per item)
+    const byItem = {};
+    for (const l of lines) {
+      const k = l.item_id;
+      byItem[k] = byItem[k] || { sku: l.sku, description: l.description, uom: l.uom, nmfc: l.nmfc, cls: l.freight_class,
+        pallets: new Set(), qty: 0, weight: 0 };
+      byItem[k].pallets.add(l.pallet_id);
+      byItem[k].qty += Number(l.qty);
+      byItem[k].weight += Number(l.product_weight_lbs || 0);
+    }
+    const items = Object.values(byItem).sort((a, b) => a.sku.localeCompare(b.sku));
+    items.forEach(i => { i.hu = i.pallets.size; i.weight += tare * i.hu; });
+    const totHU = new Set(lines.map(l => l.pallet_id)).size;
+    const totWeight = items.reduce((a, i) => a + i.weight, 0);
+    const uoms = [...new Set(items.map(i => i.uom))];
+    const totQty = uoms.length === 1 ? fmtQty(items.reduce((a, i) => a + i.qty, 0)) : '';
+    const wt = n => n ? fmtQty(Math.round(n)) : '';
+
+    const ids = idDefs(s).filter(d => lines.some(l => l[d.field]));
+
+    const html = `
+      <style>
+        .bl { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9.5pt; }
+        .bl table { width: 100%; border-collapse: collapse; }
+        .bl td, .bl th { border: .75pt solid #000; padding: 3pt 4pt; vertical-align: top; text-align: left; }
+        .bl th { background: #e6e6e6; font-size: 8pt; text-transform: uppercase; }
+        .bl .cap { font-size: 7.5pt; font-weight: 700; text-transform: uppercase; display: block; margin-bottom: 1pt; }
+        .bl .hdr td { border: 0; padding: 0; }
+        .bl h1 { font-size: 17pt; margin: 0; }
+        .bl .sub { font-size: 9pt; }
+        .bl .bolno { font-family: "Courier New", monospace; font-size: 15pt; font-weight: 800; }
+        .bl .num { text-align: right; }
+        .bl .center { text-align: center; }
+        .bl .big { font-size: 11pt; font-weight: 700; }
+        .bl .bx { display: inline-block; width: 9pt; height: 9pt; border: .75pt solid #000; text-align: center;
+                  line-height: 9pt; font-size: 8pt; margin-right: 3pt; vertical-align: middle; }
+        .bl .sec { margin-top: 6pt; }
+        .bl .fine { font-size: 7.5pt; }
+        .bl .sig td { height: 46pt; width: 33.3%; }
+        .bl tfoot td { font-weight: 800; background: #f2f2f2; }
+        .bl .bc-bol { width: 2.4in; height: .45in; display: block; margin-left: auto; }
+        .bl .mono { font-family: "Courier New", monospace; }
+        .bl .pg2 { page-break-before: always; break-before: page; }
+      </style>
+      <div class="bl">
+        <table class="hdr"><tr>
+          <td><h1>BILL OF LADING</h1><div class="sub">Straight Bill of Lading &mdash; Short Form &mdash; Not Negotiable</div></td>
+          <td style="text-align:right"><span class="cap">BOL Number</span><div class="bolno">${esc(ship.shipment_no)}</div>
+            <svg class="bc bc-bol" data-value="${esc(ship.shipment_no)}" data-h="45"></svg></td>
+        </tr></table>
+
+        <table class="sec">
+          <tr>
+            <td style="width:50%"><span class="cap">Ship From</span><span class="big">${company}</span><br>${fromAddr}${s.phone ? '<br>' + esc(s.phone) : ''}</td>
+            <td><span class="cap">Date</span>${esc(fmtDate(ship.ship_date))}${ship.appt_time ? ' &nbsp; Appt ' + esc(fmtTimeStr(ship.appt_time)) : ''}<br>
+              <span class="cap" style="margin-top:4pt">Carrier Name</span>${esc(ship.carrier || '')}</td>
+          </tr>
+          <tr>
+            <td><span class="cap">Ship To</span><span class="big">${esc(ship.ship_to_name || '')}</span><br>${toAddr}
+              ${ship.ship_to_contact || ship.ship_to_phone ? `<br>Attn: ${esc([ship.ship_to_contact, ship.ship_to_phone].filter(Boolean).join(' · '))}` : ''}</td>
+            <td>
+              <table class="hdr"><tr>
+                <td style="width:50%"><span class="cap">Trailer #</span>${esc(ship.trailer_no || '')}</td>
+                <td><span class="cap">Seal #</span>${esc(ship.seal_no || '')}</td></tr>
+                <tr><td style="padding-top:4pt"><span class="cap">SCAC</span>${esc(ship.carrier_scac || '')}</td>
+                <td style="padding-top:4pt"><span class="cap">PRO #</span>${esc(ship.pro_number || '')}</td></tr></table>
+            </td>
+          </tr>
+          <tr>
+            <td><span class="cap">Third Party Freight Charges Bill To</span>${esc(ship.third_party_bill_to || '').replace(/\n/g, '<br>')}</td>
+            <td><span class="cap">Freight Charge Terms</span>
+              ${box(ship.freight_terms === 'prepaid')} Prepaid &nbsp; ${box(ship.freight_terms === 'collect')} Collect &nbsp; ${box(ship.freight_terms === 'third_party')} 3rd Party</td>
+          </tr>
+          <tr><td colspan="2"><span class="cap">Special Instructions</span>${esc(ship.special_instructions || '')}</td></tr>
+        </table>
+
+        <table class="sec">
+          <thead><tr><th>Customer Order #</th><th class="num"># Pkgs</th><th class="num">Weight (lbs)</th><th class="center">Pallet/Slip</th><th>Additional Shipper Info</th></tr></thead>
+          <tbody><tr><td>${esc(ship.customer_order_no || '')}</td><td class="num">${esc(totQty)}</td><td class="num">${esc(wt(totWeight))}</td>
+            <td class="center">${totHU ? 'Y' : 'N'}</td><td>${ship.po_number ? 'PO ' + esc(ship.po_number) : ''}</td></tr></tbody>
+        </table>
+
+        <table class="sec">
+          <thead><tr><th class="num">HU Qty</th><th>HU Type</th><th class="num">Pkg Qty</th><th>Pkg Type</th><th class="num">Weight (lbs)</th>
+            <th class="center">H.M.</th><th>Commodity Description</th><th>NMFC #</th><th>Class</th></tr></thead>
+          <tbody>${items.map(i => `<tr><td class="num">${i.hu}</td><td>PLT</td><td class="num">${esc(fmtQty(i.qty))}</td><td>${esc(i.uom)}</td>
+            <td class="num">${esc(wt(i.weight))}</td><td class="center"></td><td>${esc(i.sku)} &mdash; ${esc(i.description)}</td>
+            <td>${esc(i.nmfc || '')}</td><td>${esc(i.cls || '')}</td></tr>`).join('')}</tbody>
+          <tfoot><tr><td class="num">${totHU}</td><td>PLT</td><td class="num">${esc(totQty)}</td><td>${uoms.length === 1 ? esc(uoms[0]) : ''}</td>
+            <td class="num">${esc(wt(totWeight))}</td><td></td><td>Grand Total</td><td></td><td></td></tr></tfoot>
+        </table>
+
+        <p class="fine sec">This is to certify that the above named materials are properly classified, packaged, marked and labeled,
+          and are in proper condition for transportation according to applicable regulations. Received subject to the rates,
+          classifications and rules agreed between the carrier and shipper, or as published by the carrier.</p>
+
+        <table class="sec sig">
+          <tr>
+            <td><span class="cap">Shipper Signature / Date</span></td>
+            <td><span class="cap">Trailer Loaded</span>${box(false)} By shipper &nbsp; ${box(false)} By driver
+              <span class="cap" style="margin-top:6pt">Freight Counted</span>${box(false)} By shipper &nbsp; ${box(false)} By driver</td>
+            <td><span class="cap">Carrier Signature / Pickup Date</span></td>
+          </tr>
+          <tr><td colspan="3" style="height:40pt"><span class="cap">Consignee: received in good order, except as noted / Signature / Date</span></td></tr>
+        </table>
+
+        <div class="pg2">
+          <table class="hdr"><tr><td><h1 style="font-size:14pt">Pallet Detail</h1></td>
+            <td style="text-align:right"><span class="cap">BOL Number</span><span class="bolno" style="font-size:12pt">${esc(ship.shipment_no)}</span></td></tr></table>
+          <table class="sec">
+            <thead><tr><th>WMS Pallet ID</th>${ids.map(d => `<th>${esc(d.label)}</th>`).join('')}<th>SKU</th><th>${esc(lotLabel(s))}</th><th class="num">Qty</th><th>UOM</th></tr></thead>
+            <tbody>${lines.map(l => `<tr><td class="mono">${esc(l.lp_id)}</td>${ids.map(d => `<td>${esc(l[d.field] || '')}</td>`).join('')}
+              <td>${esc(l.sku)}</td><td>${esc(l.lot_number || '')}</td><td class="num">${esc(fmtQty(l.qty))}</td><td>${esc(l.uom)}</td></tr>`).join('')}</tbody>
+          </table>
+          <p class="fine sec">Printed ${esc(fmtDateTime(new Date()))}${ship.status !== 'shipped' ? ' &middot; ' + esc(ship.status.toUpperCase()) + ' (not yet shipped)' : ''}</p>
+        </div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.4in;');
+  }
+
+  return { labels, receipt, bol };
 })();
