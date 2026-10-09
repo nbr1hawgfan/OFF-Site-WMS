@@ -3,6 +3,18 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.4.1 picking help:**
+- **Adding a product to a load** shows pallets available per item (in the
+  dropdown) and, once picked, a table by lot with qty and bays. Tap a lot to
+  use it.
+- **Pick from:** order lines (office, Dock Mode and the printed Load Sheet)
+  list the bays to pull from, oldest pallets first.
+- **BOL pallet detail** is grouped by item with an Item Total row, like the
+  LWH BOL.
+- **Charge picker** shows each charge type's code (e.g. "59 — Manual inbound").
+  A receipt can be closed with no pallets, so drop-offs that never hit inventory
+  just carry their charges.
+
 **v1.4.0 identifiers per account** (migration 015):
 - **Setup:** Setup > Accounts > edit > Pallet identifiers > "Custom for this
   account" gives that account its own names and Required / Unique / Barcode

@@ -223,6 +223,13 @@ table.data td.num, table.data th.num { text-align: right; }
 .bar span { display: block; height: 100%; background: var(--red); }
 .order-line.done .bar span { background: var(--ok); }
 .order-line.done { border-color: #b9dfc5; }
+.order-line .pick-from { margin-top: 6px; }
+.avail-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0 0 12px; background: var(--card, #fff); }
+.avail-tbl { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: .9rem; }
+.avail-tbl th, .avail-tbl td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--line); }
+.avail-tbl th { font-size: .75rem; text-transform: uppercase; color: var(--muted, #666); border-top: 0; }
+.avail-tbl .num { text-align: right; }
+.avail-tbl tr[data-lot] { cursor: pointer; }
 
 /* ---------- dock mode ---------- */
 .dock-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

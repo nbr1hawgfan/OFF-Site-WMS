@@ -251,9 +251,18 @@ const WmsPrint = (() => {
     const wt = n => n ? fmtQty(Math.round(n)) : '';
 
     const ids = idDefs(s).filter(d => lines.some(l => l[d.field]));
+    // pallet detail: grouped by item (like the LWH BOL), each with an item total
+    const sortedLines = [...lines].sort((a, b) => a.sku.localeCompare(b.sku) || String(a.lot_number || '').localeCompare(String(b.lot_number || '')) || String(a.lp_id).localeCompare(String(b.lp_id)));
+    const detailGroups = [];
+    for (const l of sortedLines) {
+      let g = detailGroups[detailGroups.length - 1];
+      if (!g || g.item_id !== l.item_id) detailGroups.push(g = { item_id: l.item_id, sku: l.sku, description: l.description, uom: l.uom, qty: 0, rows: [] });
+      g.rows.push(l); g.qty += Number(l.qty);
+    }
 
     const html = `
       <style>
+        .bl tr.itot td { font-weight: 700; background: #f7f7f7; border-top: 1.25pt solid #000; }
         .bl { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9.5pt; }
         .bl table { width: 100%; border-collapse: collapse; }
         .bl td, .bl th { border: .75pt solid #000; padding: 3pt 4pt; vertical-align: top; text-align: left; }
@@ -344,8 +353,11 @@ const WmsPrint = (() => {
             <td style="text-align:right"><span class="cap">BOL Number</span><span class="bolno" style="font-size:12pt">${esc(ship.shipment_no)}</span></td></tr></table>
           <table class="sec">
             <thead><tr><th>WMS Pallet ID</th>${ids.map(d => `<th>${esc(d.label)}</th>`).join('')}<th>SKU</th><th>${esc(lotLabel(s))}</th><th class="num">Qty</th><th>UOM</th></tr></thead>
-            <tbody>${lines.map(l => `<tr><td class="mono">${esc(l.lp_id)}</td>${ids.map(d => `<td>${esc(l[d.field] || '')}</td>`).join('')}
-              <td>${esc(l.sku)}</td><td>${esc(l.lot_number || '')}</td><td class="num">${esc(fmtQty(l.qty))}</td><td>${esc(l.uom)}</td></tr>`).join('')}</tbody>
+            <tbody>${detailGroups.map(g => g.rows.map(l => `<tr><td class="mono">${esc(l.lp_id)}</td>${ids.map(d => `<td>${esc(l[d.field] || '')}</td>`).join('')}
+              <td>${esc(l.sku)}</td><td>${esc(l.lot_number || '')}</td><td class="num">${esc(fmtQty(l.qty))}</td><td>${esc(l.uom)}</td></tr>`).join('')
+              + `<tr class="itot"><td>${g.rows.length} pallet${g.rows.length === 1 ? '' : 's'}</td><td colspan="${ids.length + 2}">Item Total &mdash; ${esc(g.sku)} ${esc(g.description || '')}</td>
+              <td class="num">${esc(fmtQty(g.qty))}</td><td>${esc(g.uom)}</td></tr>`).join('')}</tbody>
+            <tfoot><tr><td>${totHU} pallet${totHU === 1 ? '' : 's'}</td><td colspan="${ids.length + 2}">Grand Total</td><td class="num">${esc(totQty)}</td><td>${uoms.length === 1 ? esc(uoms[0]) : ''}</td></tr></tfoot>
           </table>
           <p class="fine sec">Printed ${esc(fmtDateTime(new Date()))}${ship.status !== 'shipped' ? ' &middot; ' + esc(ship.status.toUpperCase()) + ' (not yet shipped)' : ''}</p>
         </div>
@@ -373,6 +385,7 @@ const WmsPrint = (() => {
       .ds td { font-size: 12pt; height: 22pt; }
       .ds .num { text-align: right; }
       .ds .chk { width: 70pt; }
+      .ds td.bays { font-size: 10pt; font-weight: 700; }
       .ds .box { display: inline-block; width: 14pt; height: 14pt; border: 1.25pt solid #000; vertical-align: middle; }
       .ds .note { border: 1.5pt solid #000; padding: 8pt; margin-top: 10pt; font-size: 12pt; }
       .ds .sign { display: grid; grid-template-columns: 1fr 1fr; gap: 30pt; margin-top: 34pt; }
@@ -408,12 +421,13 @@ const WmsPrint = (() => {
         </div>
         ${ship.special_instructions ? `<div class="note"><strong>Instructions:</strong> ${esc(ship.special_instructions)}</div>` : ''}
         <table>
-          <thead><tr><th>SKU</th><th>Description</th><th>${esc(lotLbl)}</th><th class="num">Pallets</th><th class="num">Qty</th><th class="chk">Loaded</th></tr></thead>
+          <thead><tr><th>SKU</th><th>Description</th><th>${esc(lotLbl)}</th><th class="num">Pallets</th><th class="num">Qty</th><th>Pick from (oldest first)</th><th class="chk">Loaded</th></tr></thead>
           <tbody>${orders.length ? orders.map(o => `<tr><td><strong>${esc(o.sku)}</strong></td><td>${esc(o.description)}</td>
               <td><strong>${esc(o.lot_number || 'Any')}</strong></td><td class="num">${esc(o.pallets_ordered ?? '')}</td>
-              <td class="num">${o.qty_ordered ? esc(fmtQty(o.qty_ordered) + ' ' + o.uom) : ''}</td><td><span class="box"></span> ____</td></tr>`).join('')
-            : '<tr><td colspan="6">No order list: load per the paperwork.</td></tr>'}
-            ${'<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(Math.max(0, 4 - orders.length))}</tbody>
+              <td class="num">${o.qty_ordered ? esc(fmtQty(o.qty_ordered) + ' ' + o.uom) : ''}</td>
+              <td class="bays">${o.bays === undefined ? '' : o.bays ? esc(o.bays) : '<em>none on hand</em>'}</td><td><span class="box"></span> ____</td></tr>`).join('')
+            : '<tr><td colspan="7">No order list: load per the paperwork.</td></tr>'}
+            ${'<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(Math.max(0, 4 - orders.length))}</tbody>
         </table>
         <div class="sign"><div>Loaded by</div><div>Time finished</div></div>
         <div class="foot">Scan the barcode above in Dock Mode &gt; Load. Printed ${esc(fmtDateTime(new Date()))}</div>

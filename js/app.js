@@ -1382,7 +1382,7 @@
     $('#close-rcpt', page)?.addEventListener('click', async () => {
       const msg = active.length
         ? `Close ${esc(rcpt.receipt_no)} with ${active.length} pallet${active.length === 1 ? '' : 's'}? No more pallets can be added after closing.`
-        : `${esc(rcpt.receipt_no)} has no pallets. Close it anyway?`;
+        : `${esc(rcpt.receipt_no)} has no pallets. Close it anyway?<br><span class="muted small">Fine for a drop-off that never goes into inventory: its charges (Charges card) still bill.</span>`;
       if (!await askConfirm('Close receipt?', msg, 'Close Receipt')) return;
       busy($('#close-rcpt'), async () => {
         await q(sb.rpc('wms_close_receipt', { p_receipt_id: id }));
@@ -2043,12 +2043,17 @@
     const mySeq = navSeq;
     if (!document.querySelector('#dock-load')) render(`<div class="loading">Loading...</div>`);
     const [ship, lines, orders] = await Promise.all([
-      q(sb.from('shipments').select('id, shipment_no, status, ship_date, appt_time, dock_door, ship_to_name, ship_to_city, ship_to_state, carrier, trailer_no, special_instructions, loaded_at').eq('id', id).single()),
+      q(sb.from('shipments').select('id, shipment_no, status, ship_date, appt_time, dock_door, ship_to_name, ship_to_city, ship_to_state, carrier, trailer_no, special_instructions, loaded_at, owner_id, warehouse_id').eq('id', id).single()),
       q(sb.from('v_shipment_detail').select('*').eq('shipment_id', id).order('created_at', { ascending: false })),
       q(sb.from('v_order_progress').select('*').eq('shipment_id', id).order('created_at'))
     ]);
     if (mySeq !== navSeq) return;
     const isOpen = ship.status === 'open';
+    if (isOpen && orders.length) {
+      const stock = await stockFor(ship.owner_id, ship.warehouse_id).catch(() => null);
+      if (mySeq !== navSeq) return;
+      if (stock) orders.forEach(o => { o.bays = baysText(stockMatch(stock, o.item_id, o.lot_number)); });
+    }
     const allDone = orders.length > 0 && orders.every(orderDone);
     const shortText = orders.map(orderRemaining).filter(Boolean).join('; ');
 
@@ -2278,6 +2283,29 @@
     const b = o.qty_ordered ? Number(o.qty_loaded) / Number(o.qty_ordered) : 1;
     return Math.max(0, Math.min(1, Math.min(a, b)));
   }
+  /* stock for picking: an account's available pallets in one warehouse, oldest first */
+  async function stockFor(ownerId, whId) {
+    if (!ownerId || !whId) return [];
+    const rows = await fetchAll(() => sb.from('v_inventory')
+      .select('pallet_id, item_id, lot_number, qty_available, uom, location, status, received_at')
+      .eq('owner_id', ownerId).eq('warehouse_id', whId).order('pallet_id'));
+    return rows.filter(r => r.status === 'on_hand' && Number(r.qty_available) > 0)
+      .sort((a, b) => String(a.received_at || '').localeCompare(String(b.received_at || '')));
+  }
+  const stockMatch = (stock, itemId, lot) => stock.filter(r => r.item_id === itemId && (!lot || (r.lot_number || '').toUpperCase() === String(lot).toUpperCase()));
+  // "MR121 (3), A01, EM613 (2) +4 more": bays in pick order (oldest pallet first)
+  function baysText(rows, max = 6) {
+    const m = new Map();
+    for (const r of rows) m.set(r.location || '?', (m.get(r.location || '?') || 0) + 1);
+    const list = [...m.entries()].map(([b, n]) => n > 1 ? `${b} (${n})` : b);
+    return list.slice(0, max).join(', ') + (list.length > max ? ` +${list.length - max} more` : '');
+  }
+  function stockSummary(rows) {
+    const uoms = [...new Set(rows.map(r => r.uom))];
+    const qty = rows.reduce((a, r) => a + Number(r.qty_available), 0);
+    return `${rows.length} pallet${rows.length === 1 ? '' : 's'}${uoms.length === 1 ? ' · ' + fmtQty(qty) + ' ' + uoms[0] : ''}`;
+  }
+
   function orderRow(o, canDelete) {
     const done = orderDone(o);
     return `
@@ -2287,6 +2315,7 @@
             <div class="meta">${esc(o.description)}</div></div>
           <div style="text-align:right"><strong>${esc(orderNeed(o))}</strong>${done ? '<div class="meta" style="color:var(--ok)">Complete</div>' : ''}</div>
         </div>
+        ${!done && o.bays !== undefined ? `<div class="meta pick-from">${o.bays ? `Pick from: <strong>${esc(o.bays)}</strong>` : '<span style="color:var(--bad)">None available in this warehouse</span>'}</div>` : ''}
         <div class="bar"><span style="width:${Math.round(orderPct(o) * 100)}%"></span></div>
         ${canDelete ? `<div class="row" style="margin-top:6px"><button type="button" class="btn sm ghost" data-ol-del="${o.order_line_id}">Remove line</button></div>` : ''}
       </div>`;
@@ -2488,6 +2517,10 @@
     if (mySeq !== navSeq) return;
     const isOpen = ship.status === 'open';
     const editable = isOpen && can('operator');
+    const stock = isOpen ? await stockFor(ship.owner_id, ship.warehouse_id).catch(() => null) : null;
+    if (mySeq !== navSeq) return;
+    if (stock) orders.forEach(o => { o.bays = baysText(stockMatch(stock, o.item_id, o.lot_number)); });
+    const availOf = itemId => stock ? stockMatch(stock, itemId) : [];
     const t = shipTotals(lines);
     const qtyText = Object.entries(t.byUom).map(([u, n]) => `${fmtQty(n)} ${u}`).join(' + ');
     const shortText = orders.map(orderRemaining).filter(Boolean).join('; ');
@@ -2547,7 +2580,8 @@
           <form id="ol-form" style="margin-top:8px" autocomplete="off">
             <div class="field"><label for="ol-item">Add product to load</label>
               <select id="ol-item" required><option value="">Select item...</option>
-                ${activeItems.map(i => `<option value="${i.id}">${esc(i.sku)} — ${esc(i.description)}</option>`).join('')}</select></div>
+                ${activeItems.map(i => { const n = availOf(i.id).length; return `<option value="${i.id}">${esc(i.sku)} — ${esc(i.description)}${stock ? ` (${n ? n + ' plt avail' : 'none avail'})` : ''}</option>`; }).join('')}</select></div>
+            <div id="ol-avail"></div>
             <div class="grid2">
               <div class="field"><label for="ol-lot">${esc(lbl.lot())} <span class="muted small">(blank = any)</span></label>
                 <input id="ol-lot" maxlength="60"></div>
@@ -2665,6 +2699,31 @@
 
     $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id), billToOf(ship.owner_id));
     $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id)));
+
+    // picking an item shows what's available, by lot, with bays (tap a lot to use it)
+    $('#ol-item', page)?.addEventListener('change', e => {
+      const box = $('#ol-avail', page);
+      const rows = e.target.value ? availOf(e.target.value) : [];
+      if (!e.target.value || !stock) { box.innerHTML = ''; return; }
+      if (!rows.length) { box.innerHTML = `<div class="notice warn" style="margin:0 0 10px">None available in ${esc(whById(ship.warehouse_id).code || 'this warehouse')}.</div>`; return; }
+      const byLot = new Map();
+      for (const r of rows) { const k = r.lot_number || ''; byLot.set(k, [...(byLot.get(k) || []), r]); }
+      box.innerHTML = `
+        <div class="avail-box">
+          <div class="row spread"><strong>Available: ${esc(stockSummary(rows))}</strong><span class="muted small">oldest first</span></div>
+          <table class="avail-tbl"><thead><tr><th>${esc(lbl.lotShort())}</th><th class="num">Pallets</th><th class="num">Qty</th><th>Bays</th></tr></thead>
+          <tbody>${[...byLot.entries()].map(([lot, rs]) => `<tr data-lot="${esc(lot)}" title="Use this ${esc(lbl.lotShort().toLowerCase())}">
+            <td><a href="#">${esc(lot || '(none)')}</a></td><td class="num">${rs.length}</td><td class="num">${esc(fmtQty(rs.reduce((a, r) => a + Number(r.qty_available), 0)))}</td>
+            <td>${esc(baysText(rs, 4))}</td></tr>`).join('')}</tbody></table>
+        </div>`;
+      $$('[data-lot]', box).forEach(tr => tr.onclick = ev => {
+        ev.preventDefault();
+        $('#ol-lot', page).value = tr.dataset.lot;
+        const rs = byLot.get(tr.dataset.lot) || [];
+        if (!$('#ol-pallets', page).value) $('#ol-pallets', page).placeholder = 'up to ' + rs.length;
+        $('#ol-pallets', page).focus();
+      });
+    });
 
     $('#ol-form', page)?.addEventListener('submit', e => {
       e.preventDefault();
@@ -2929,7 +2988,7 @@
       <form id="chg-form" autocomplete="off">
         <p class="muted small" style="margin-top:0">Account ${esc(ownerById(ctx.owner_id).code || '')}</p>
         <div class="field"><label for="chg-type">Charge</label>
-          <select id="chg-type">${types.map(t => `<option value="${t.id}" ${ctx.typeCode === t.code ? 'selected' : ''}>${esc(t.name)} (per ${esc(t.unit)})</option>`).join('')}</select></div>
+          <select id="chg-type">${types.map(t => `<option value="${t.id}" ${ctx.typeCode === t.code ? 'selected' : ''}>${esc(t.code)} — ${esc(t.name)} (per ${esc(t.unit)})</option>`).join('')}</select></div>
         <div class="grid2">
           <div class="field"><label for="chg-qty">Qty</label><input id="chg-qty" type="number" inputmode="decimal" step="any" min="0.01" value="1" required></div>
           <div class="field"><label for="chg-rate">Rate ($)</label><input id="chg-rate" type="number" inputmode="decimal" step="any" min="0" required></div>
