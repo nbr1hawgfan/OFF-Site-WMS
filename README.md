@@ -20,8 +20,12 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
     storage on the 1st like any other.
 - **Schedule lanes:** Inbound and Outbound show as separate lanes in the Day and
   Week views. "Together" switches back to the combined view.
-- **"Modern" theme ready:** white, black hairlines, square corners. Not turned
-  on; waiting on the branding decision.
+- **Theme choice** (Setup > Company > Look, admins):
+  - **LWH:** the red header.
+  - **Modern:** bright white, sharp lines, one accent color (default teal
+    #00667D) that also colors the line on printed documents.
+  - **Readability:** thin type is used only on desktop. Phones and Dock Mode
+    keep bold text and solid buttons for sunlight.
 
 **v1.0.0 added:**
 - **Inventory screen** (menu > Inventory):

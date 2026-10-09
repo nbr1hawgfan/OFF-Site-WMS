@@ -422,48 +422,59 @@ a.kpi:hover { border-color: #b9b9c0; }
 }
 
 /* ======================================================================
-   "Modern" theme: bright white, black hairlines, square corners.
-   Turned on by <body class="theme-modern">. Everything else is unchanged.
+   "Modern" theme: bright white, black hairlines, square corners, one accent
+   color (Setup > Company). Turned on by <body class="theme-modern">.
+   Thin type only on desktop; phones and Dock Mode stay bold for sunlight.
    ====================================================================== */
 body.theme-modern {
-  --red: #111111; --red-dark: #000000; --black: #111111;
-  --line: #e2e2e0; --bg: #ffffff; --card: #ffffff; --muted: #6b6b68; --radius: 0px;
-  letter-spacing: .1px;
+  --accent: #00667D; --accent-dark: #004f61; --accent-tint: #e6f0f2;
+  --red: var(--accent); --red-dark: var(--accent-dark); --black: #111111;
+  --line: #e2e2e0; --bg: #ffffff; --card: #ffffff; --muted: #5c5c59; --radius: 0px;
 }
-body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 1px solid #111; }
+body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 3px solid var(--accent); }
 body.theme-modern .brand { color: #111; }
-body.theme-modern .brand-mark { background: #111; border-radius: 0; letter-spacing: 2px; font-weight: 700; }
-body.theme-modern .brand-text { font-weight: 300; letter-spacing: 3px; text-transform: uppercase; font-size: 16px; }
+body.theme-modern .brand-mark { background: var(--accent); border-radius: 0; letter-spacing: 2px; }
+body.theme-modern .brand-text { font-weight: 400; letter-spacing: 3px; text-transform: uppercase; font-size: 16px; }
 body.theme-modern .header-right button { color: #111; border: 1px solid #111; border-radius: 0; }
 body.theme-modern .wh-switch { background: #fff; color: #111; border: 1px solid #111; border-radius: 0; }
-body.theme-modern .wh-tag { background: #fff; color: #111; border: 1px solid #111; border-radius: 0; font-weight: 600; letter-spacing: 1.5px; }
+body.theme-modern .wh-tag { background: var(--accent); color: #fff; border-radius: 0; letter-spacing: 1.5px; }
 body.theme-modern #hdr-wx:not(:empty) { border-right-color: #cfcfcc; }
-body.theme-modern h1 { font-weight: 300; letter-spacing: .5px; }
-body.theme-modern h2 { font-weight: 500; }
-body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile { border-radius: 0; border-color: var(--line); box-shadow: none; }
-body.theme-modern .card.accent { border-top: 2px solid #111; }
-body.theme-modern .tile { border-left: 2px solid #111; }
-body.theme-modern .btn, body.theme-modern input, body.theme-modern select, body.theme-modern textarea,
-body.theme-modern .tabs a, body.theme-modern .notice, body.theme-modern .modal-card, body.theme-modern .toast { border-radius: 0; }
-body.theme-modern .btn { font-weight: 600; letter-spacing: .6px; text-transform: uppercase; font-size: 15px; }
-body.theme-modern .btn.secondary { background: #fff; color: #111; border-color: #111; }
-body.theme-modern .btn.danger { color: #b3261e; border-color: #b3261e; }
-body.theme-modern input, body.theme-modern select, body.theme-modern textarea { border: 1px solid #bdbdba; }
-body.theme-modern input:focus, body.theme-modern select:focus, body.theme-modern textarea:focus { outline: 2px solid rgba(17,17,17,.15); border-color: #111; }
-body.theme-modern .badge { border-radius: 0; font-weight: 600; letter-spacing: 1px; }
-body.theme-modern .kpi-label, body.theme-modern table.data th { letter-spacing: 1.2px; font-weight: 600; }
-body.theme-modern .kpi-value { font-weight: 300; font-size: 30px; }
-@media (min-width: 1100px) { body.theme-modern.office .kpi-value { font-size: 28px; } }
-body.theme-modern .big-money { font-weight: 300; }
-body.theme-modern .hbar-fill { border-radius: 0; } body.theme-modern .vbar-fill { border-radius: 0; }
-body.theme-modern .back, body.theme-modern a { color: #111; }
+body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile, body.theme-modern .week-day { border-radius: 0; box-shadow: none; }
+body.theme-modern .card.accent { border-top: 3px solid var(--accent); }
+body.theme-modern .tile { border-left: 4px solid var(--accent); }
+body.theme-modern .btn, body.theme-modern input, body.theme-modern select, body.theme-modern textarea, body.theme-modern .tabs a,
+body.theme-modern .notice, body.theme-modern .modal-card, body.theme-modern .toast, body.theme-modern .badge,
+body.theme-modern .flash, body.theme-modern .seg, body.theme-modern .seg a, body.theme-modern .ev { border-radius: 0; }
+body.theme-modern .btn { letter-spacing: .5px; text-transform: uppercase; }
+body.theme-modern .btn.secondary { background: #fff; color: var(--accent); border-color: var(--accent); }
+body.theme-modern .btn.dark { background: #111; border-color: #111; }
+body.theme-modern .btn.danger { color: var(--bad); border-color: var(--bad); }
+body.theme-modern .tabs a.active { background: var(--accent); border-color: var(--accent); }
+body.theme-modern input, body.theme-modern select, body.theme-modern textarea { border: 1.5px solid #9d9d99; }
+body.theme-modern input:focus, body.theme-modern select:focus, body.theme-modern textarea:focus { outline: 3px solid var(--accent-tint); border-color: var(--accent); }
+body.theme-modern .back, body.theme-modern a { color: var(--accent); }
+body.theme-modern a.list-item, body.theme-modern a.kpi, body.theme-modern a.tile, body.theme-modern .sidenav a, body.theme-modern .week-head { color: #111; }
 body.theme-modern .toast { background: #111; }
+body.theme-modern .lane-head { border-left-color: #111; }
+body.theme-modern .lane-out .lane-head { border-left-color: var(--accent); }
+body.theme-modern .week-day.today { border: 2px solid var(--accent); }
+body.theme-modern .hbar-fill, body.theme-modern .vbar-fill { border-radius: 0; }
+/* Dock Mode: solid accent tiles, heavy type (readable in sun, with gloves) */
+body.theme-modern .dock-tile, body.theme-modern a.dock-tile { background: var(--accent); color: #fff; border-radius: 0; border-bottom: 6px solid #111; }
+body.theme-modern .dock-tile:active { background: var(--accent-dark); }
+body.theme-modern .big-input { border: 2px solid #111; }
+/* desktop office screens: the light, airy version */
 @media (min-width: 1100px) {
+  body.theme-modern.office h1 { font-weight: 300; letter-spacing: .5px; }
+  body.theme-modern.office h2 { font-weight: 500; }
+  body.theme-modern.office .kpi-value, body.theme-modern.office .big-money { font-weight: 300; }
+  body.theme-modern.office .kpi-label, body.theme-modern.office table.data th { letter-spacing: 1.2px; font-weight: 600; }
+  body.theme-modern.office .card, body.theme-modern.office .kpi { border-color: var(--line); }
   body.theme-modern.office .sidenav { background: #fff; border-right: 1px solid #e2e2e0; padding-top: 18px; }
-  body.theme-modern.office .sidenav a { color: #555; font-weight: 500; border-radius: 0; letter-spacing: .3px; }
+  body.theme-modern.office .sidenav a { color: #444; font-weight: 500; border-radius: 0; letter-spacing: .3px; }
   body.theme-modern.office .sidenav a:hover { background: #f4f4f2; color: #111; }
-  body.theme-modern.office .sidenav a.active { background: #fff; color: #111; font-weight: 700; border-left: 2px solid #111; }
-  body.theme-modern.office .nav-foot { color: #8a8a86; }
+  body.theme-modern.office .sidenav a.active { background: var(--accent-tint); color: var(--accent-dark); font-weight: 700; border-left: 3px solid var(--accent); }
+  body.theme-modern.office .nav-foot { color: #77776f; }
   body.theme-modern.office .view { padding-top: 28px; }
 }
 

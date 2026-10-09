@@ -144,7 +144,7 @@ const WmsPrint = (() => {
       <style>
         .rc { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 10.5pt; }
         .rc-head { display: flex; justify-content: space-between; align-items: flex-start;
-                   border-bottom: 3pt solid #C41230; padding-bottom: 8pt; margin-bottom: 10pt; }
+                   border-bottom: 3pt solid ${window.WMS_DOC_ACCENT || '#C41230'}; padding-bottom: 8pt; margin-bottom: 10pt; }
         .rc-co { font-size: 16pt; font-weight: 800; }
         .rc-title { text-align: right; }
         .rc-title h1 { font-size: 18pt; margin: 0; }
@@ -349,7 +349,7 @@ const WmsPrint = (() => {
     <style>
       .ds { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 11pt; }
       .ds-head { display: flex; justify-content: space-between; align-items: flex-start;
-                 border-bottom: 3pt solid #C41230; padding-bottom: 8pt; margin-bottom: 10pt; }
+                 border-bottom: 3pt solid ${window.WMS_DOC_ACCENT || '#C41230'}; padding-bottom: 8pt; margin-bottom: 10pt; }
       .ds h1 { font-size: 24pt; margin: 0; letter-spacing: 1pt; }
       .ds .co { font-size: 11pt; font-weight: 700; }
       .ds .code { font-family: "Courier New", monospace; font-size: 22pt; font-weight: 800; text-align: right; }
@@ -460,7 +460,7 @@ const WmsPrint = (() => {
       <style>
         .st { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 10pt; }
         .st-head { display: flex; justify-content: space-between; align-items: flex-start;
-                   border-bottom: 3pt solid #C41230; padding-bottom: 8pt; margin-bottom: 10pt; }
+                   border-bottom: 3pt solid ${window.WMS_DOC_ACCENT || '#C41230'}; padding-bottom: 8pt; margin-bottom: 10pt; }
         .st-co { font-size: 16pt; font-weight: 800; }
         .st-title { text-align: right; }
         .st-title h1 { font-size: 18pt; margin: 0; }
@@ -525,9 +525,9 @@ const WmsPrint = (() => {
     return `<div class="tb-head"><div><div class="tb-co">${company}</div><div class="tb-sub">${esc(sub || '')}</div></div>
       <div class="tb-title"><h1>${esc(title)}</h1><div>${esc(fmtDateTime(new Date()))}</div></div></div>`;
   }
-  const TB_CSS = `
+  const TB_CSS = () => `
     .tb { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9pt; }
-    .tb-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5pt solid #C41230; padding-bottom: 5pt; margin-bottom: 8pt; }
+    .tb-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5pt solid ${window.WMS_DOC_ACCENT || '#C41230'}; padding-bottom: 5pt; margin-bottom: 8pt; }
     .tb-co { font-size: 13pt; font-weight: 800; }
     .tb-sub { font-size: 9pt; color: #333; }
     .tb-title { text-align: right; } .tb-title h1 { font-size: 15pt; margin: 0; }
@@ -542,7 +542,7 @@ const WmsPrint = (() => {
 
   /* any on-screen table, printed (letter landscape) */
   function table(title, sub, cols, rows, settings) {
-    const html = `<style>${TB_CSS}</style><div class="tb">${docHead(settings || {}, title, sub)}
+    const html = `<style>${TB_CSS()}</style><div class="tb">${docHead(settings || {}, title, sub)}
       <table><thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
       <tbody>${rows.map(r => `<tr>${r.map((v, i) => `<td class="${cols[i].num ? 'num' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>
       <div style="margin-top:6pt;font-size:8pt;color:#555">${rows.length} row${rows.length === 1 ? '' : 's'}</div></div>`;
@@ -559,7 +559,7 @@ const WmsPrint = (() => {
       if (!locs.length || locs[locs.length - 1].k !== k) locs.push({ k, rows: [] });
       locs[locs.length - 1].rows.push(p);
     }
-    const html = `<style>${TB_CSS}
+    const html = `<style>${TB_CSS()}
         .lr-loc { font-size: 12pt; font-weight: 800; margin: 10pt 0 3pt; padding: 3pt 6pt; background: #111; color: #fff; page-break-after: avoid; }
         .lr td.qr { width: 0.62in; padding: 2pt; }
         .lr td.qr svg { display: block; }

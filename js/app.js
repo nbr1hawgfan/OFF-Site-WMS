@@ -271,6 +271,23 @@
     renderHeader();
   }
 
+  /* theme: 'lwh' (red) or 'modern' (white + one accent); remembered per device so login doesn't flash */
+  function mixHex(hex, other, t) {
+    const a = hex.match(/\w\w/g).map(x => parseInt(x, 16)), b = other.match(/\w\w/g).map(x => parseInt(x, 16));
+    return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('');
+  }
+  function applyTheme(t = { theme: S.settings?.theme, accent: S.settings?.accent_color }) {
+    const modern = t.theme === 'modern';
+    document.body.classList.toggle('theme-modern', modern);
+    const acc = /^#[0-9A-Fa-f]{6}$/.test(t.accent || '') ? t.accent : '#00667D';
+    const root = document.body.style;
+    if (modern) { root.setProperty('--accent', acc); root.setProperty('--accent-dark', mixHex(acc, '#000000', .25)); root.setProperty('--accent-tint', mixHex(acc, '#ffffff', .9)); }
+    else ['--accent', '--accent-dark', '--accent-tint'].forEach(k => root.removeProperty(k));
+    document.querySelector('meta[name=theme-color]')?.setAttribute('content', modern ? '#ffffff' : '#C41230');
+    window.WMS_DOC_ACCENT = modern ? acc : '#C41230';
+    savePref('theme', { theme: t.theme || 'lwh', accent: acc });
+  }
+
   async function loadRef() {
     const [settings, items, locations, parties, warehouses, owners, chargeTypes] = await Promise.all([
       q(sb.from('settings').select('*').eq('id', 1).single()),
@@ -283,6 +300,7 @@
     ]);
     S.settings = settings; S.items = items; S.locations = locations; S.parties = parties;
     S.warehouses = warehouses; S.owners = owners; S.chargeTypes = chargeTypes;
+    applyTheme();
     // current warehouse: this device's last choice, else the user's home, else the first
     const ok = id => warehouses.some(w => w.id === id && w.active);
     const pref = loadPref('wh', null);
@@ -3984,8 +4002,20 @@
               <label class="check"><input type="checkbox" id="c-ref${n}bc" ${s['ref' + n + '_barcode'] ? 'checked' : ''}> Barcode on label</label>
             </div></div>`).join('')}
         </div>
+        ${'theme' in s ? `
+        <h2 style="margin-top:18px">Look</h2>
+        <div class="grid2">
+          <div class="field"><label for="c-theme">Theme</label>
+            <select id="c-theme"><option value="lwh">LWH (red header)</option><option value="modern" ${s.theme === 'modern' ? 'selected' : ''}>Modern (white, one accent color)</option></select></div>
+          <div class="field"><label for="c-accent">Accent color (Modern)</label>
+            <div class="row" style="flex-wrap:nowrap"><input id="c-accent-pick" type="color" value="${esc(s.accent_color || '#00667D')}" style="width:56px;padding:2px">
+              <input id="c-accent" value="${esc(s.accent_color || '#00667D')}" maxlength="7" pattern="#[0-9A-Fa-f]{6}" placeholder="#00667D"></div></div>
+        </div>
+        <p class="hint" style="margin-top:-4px">Changes the app for everyone and the accent line on printed documents. Phones and Dock Mode keep bold text either way.</p>` : ''}
         <button class="btn block" id="co-save">Save</button>
       </form>`;
+    $('#c-accent-pick', out)?.addEventListener('input', e => { $('#c-accent', out).value = e.target.value.toUpperCase(); });
+    $('#c-accent', out)?.addEventListener('input', e => { if (/^#[0-9A-Fa-f]{6}$/.test(e.target.value)) $('#c-accent-pick', out).value = e.target.value; });
     $('#co-form', out).onsubmit = e => {
       e.preventDefault();
       busy($('#co-save', out), async () => {
@@ -4008,7 +4038,13 @@
           row['ref' + n + '_barcode'] = $('#c-ref' + n + 'bc', out).checked;
         }
         if (!hasPallets) row.lp_prefix = $('#c-prefix', out).value.trim().toUpperCase();
+        if ($('#c-theme', out)) {
+          const acc = $('#c-accent', out).value.trim();
+          if (acc && !/^#[0-9A-Fa-f]{6}$/.test(acc)) throw new Error('Accent color must look like #00667D.');
+          row.theme = $('#c-theme', out).value; row.accent_color = acc ? acc.toUpperCase() : null;
+        }
         await q(sb.from('settings').update(row).eq('id', 1));
+        S.settings = { ...S.settings, ...row }; applyTheme();
         toast('Company info saved.');
         viewSetup('company');
       });
@@ -4019,6 +4055,7 @@
   /* boot                                                                */
   /* ------------------------------------------------------------------ */
   async function boot() {
+    applyTheme(loadPref('theme', { theme: 'lwh' }));
     if (cfg.BRAND_SHORT) $('#brand-mark').textContent = cfg.BRAND_SHORT;
     if (cfg.BRAND_NAME) $('#brand-text').textContent = cfg.BRAND_NAME;
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
