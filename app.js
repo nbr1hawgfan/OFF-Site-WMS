@@ -35,6 +35,11 @@
     try { localStorage.setItem('rmbwms.' + key, JSON.stringify(value)); } catch { /* storage unavailable */ }
   }
 
+  // "mike.dock" -> "mike.dock@wms.logistics-warehouse.com" (usernames are created by Setup > Users)
+  function loginToEmail(v) {
+    const s = String(v || '').trim().toLowerCase();
+    return s.includes('@') ? s : `${s}@${cfg.LOGIN_DOMAIN || 'wms.logistics-warehouse.com'}`;
+  }
   function friendly(err) {
     const m = (err && (err.message || err.error_description)) || String(err);
     if (/row-level security|permission denied|42501/i.test(m)) return 'You do not have permission to do this.';
@@ -42,7 +47,8 @@
     if (/items_sku_key/i.test(m)) return 'That SKU already exists.';
     if (/locations_code_key/i.test(m)) return 'That location code already exists.';
     if (/ux_pallets_customer_pallet_id/i.test(m)) return `That ${lbl.cust()} is already in use.`;
-    if (/Invalid login credentials/i.test(m)) return 'Email or password is incorrect.';
+    if (/Invalid login credentials/i.test(m)) return 'Username/email or password is incorrect.';
+    if (/banned/i.test(m)) return 'This login has been turned off. Ask your manager.';
     if (/JWT expired|invalid JWT/i.test(m)) return 'Your session expired. Please sign in again.';
     return m;
   }
@@ -293,6 +299,7 @@
       if (a === 'receipt' && b) return viewReceipt(b);
       if (a === 'lookup') return viewLookup(decodeURIComponent(b || ''));
       if (a === 'schedule') return viewSchedule(b, c);
+      if (a === 'reports') return viewReports();
       if (a === 'shipments') return viewShipments();
       if (a === 'shipment' && b === 'new') return viewNewShipment();
       if (a === 'shipment' && b) return viewShipment(b);
@@ -313,8 +320,8 @@
       <div class="login card accent">
         <h1>Sign in</h1>
         <form id="login-form">
-          <div class="field"><label for="email">Email</label>
-            <input id="email" type="email" autocomplete="username" required></div>
+          <div class="field"><label for="email">Username or email</label>
+            <input id="email" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>
           <div class="field"><label for="password">Password</label>
             <input id="password" type="password" autocomplete="current-password" required></div>
           <button class="btn block" id="login-btn">Sign in</button>
@@ -325,7 +332,7 @@
       e.preventDefault();
       busy($('#login-btn'), async () => {
         const { data, error } = await sb.auth.signInWithPassword({
-          email: $('#email').value.trim(), password: $('#password').value
+          email: loginToEmail($('#email').value), password: $('#password').value
         });
         if (error) throw error;
         S.session = data.session;
@@ -338,6 +345,7 @@
       e.preventDefault();
       const email = $('#email').value.trim();
       if (!email) { toast('Enter your email first.', 'bad'); $('#email').focus(); return; }
+      if (!email.includes('@')) { toast('Username logins are reset by your manager (Setup > Users).', 'bad'); return; }
       busy(null, async () => {
         const { error } = await sb.auth.resetPasswordForEmail(email, {
           redirectTo: location.origin + location.pathname
@@ -409,8 +417,9 @@
           <span>${pallets.toLocaleString()} pallet${pallets === 1 ? '' : 's'} on hand</span></a>
         <a class="tile" href="#/shipments"><strong>Shipping</strong>
           <span>${openShip ? `${openShip} open shipment${openShip === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
+        <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
         ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
-        ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, company info</span></a>` : ''}
+        ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, users, company info</span></a>` : ''}
       </div>
       <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
   }
@@ -782,11 +791,11 @@
           }
           if (!received.length) return;
 
+          await reload(received[received.length - 1].id);   // form ready before confirming
           if (received.length === count) {
             toast(received.length === 1 ? `Received ${received[0].lp_id}.`
               : `Received ${received.length} pallets: ${received[0].lp_id} to ${received[received.length - 1].lp_id}.`);
           }
-          await reload(received[received.length - 1].id);
           // ready for the next pallet: back to the first identifier that was used
           const firstUsed = ids.find(f => vals[f.key] || f.required);
           (firstUsed ? $('#' + firstUsed.key) : $('#qty'))?.focus();
@@ -1803,8 +1812,8 @@
           if (found.length > 1) throw new Error(`"${code}" matches ${found.length} pallets. Scan the WMS pallet ID instead.`);
           const p = found[0];
           const line = await q(sb.rpc('wms_add_to_shipment', { p_shipment_id: id, p_pallet_id: p.pallet_id, p_qty: qty }));
+          await reload(true);   // screen ready for the next scan before confirming
           toast(`Added ${p.lp_id}: ${fmtQty(line.qty)} ${p.uom}.`);
-          await reload(true);
         });
       };
       $('#pick-item', scanForm).addEventListener('change', async e => {
@@ -1827,8 +1836,8 @@
           $$('[data-pick]', out).forEach(b => b.onclick = () => busy(b, async () => {
             const r = rows.find(x => x.pallet_id === b.dataset.pick);
             const line = await q(sb.rpc('wms_add_to_shipment', { p_shipment_id: id, p_pallet_id: r.pallet_id, p_qty: null }));
-            toast(`Added ${r.lp_id}: ${fmtQty(line.qty)} ${r.uom}.`);
             await reload();
+            toast(`Added ${r.lp_id}: ${fmtQty(line.qty)} ${r.uom}.`);
           }));
         } catch (err) { out.innerHTML = `<div class="notice bad">${esc(friendly(err))}</div>`; }
       });
@@ -1893,12 +1902,250 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* setup: users (calls the admin-users server function)                */
+  /* ------------------------------------------------------------------ */
+  async function callAdminUsers(body) {
+    const { data, error } = await sb.functions.invoke('admin-users', { body });
+    if (error) {
+      let msg = error.message;
+      try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch { /* keep generic */ }
+      if (/Failed to send a request|Function not found|404/i.test(msg)) msg = 'The user manager is not set up yet (admin-users function).';
+      throw new Error(msg);
+    }
+    return data;
+  }
+  function makePassword() {
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const buf = new Uint32Array(8);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, n => chars[n % chars.length]).join('');
+  }
+  const ROLE_HELP = {
+    admin: 'Everything, including company settings and all users',
+    manager: 'Office + setup, adjustments, voids; manages operator, lift and viewer logins',
+    operator: 'Office: receipts, shipments, order lines, ship and close',
+    lift: 'Dock Mode only: unload, load, move, look up',
+    viewer: 'Look up inventory and paperwork, run reports'
+  };
+
+  async function setupUsers(out) {
+    out.innerHTML = '<div class="loading">Loading users...</div>';
+    let data;
+    try { data = await callAdminUsers({ action: 'list' }); }
+    catch (e) { out.innerHTML = `<div class="notice bad">${esc(friendly(e))}</div>`; return; }
+    const users = data.users;
+    out.innerHTML = `
+      <div class="row spread" style="margin-bottom:10px">
+        <span class="muted">${users.filter(u => u.active).length} active</span>
+        <button class="btn" id="add-user">Add User</button></div>
+      ${users.map(u => `
+        <a class="list-item" href="#" data-user="${u.id}" style="${u.active ? '' : 'opacity:.55'}">
+          <div class="row spread"><span class="title">${esc(u.full_name)}</span>
+            <span>${u.active ? '' : badge('inactive') + ' '}<span class="badge">${esc(u.role)}</span></span></div>
+          <div class="meta">Sign in: <strong>${esc(u.login)}</strong></div>
+          <div class="meta">${u.last_sign_in_at ? 'Last signed in ' + esc(fmtDateTime(u.last_sign_in_at)) : 'Never signed in'}
+            ${u.id === S.profile.id ? ' &middot; you' : ''}</div>
+        </a>`).join('')}
+      <div class="notice" style="margin-top:12px">Dock and floor staff can use a simple username (like <strong>mike.dock</strong>) instead of an email.
+        Passwords are set here; there is no email step.</div>`;
+    $('#add-user', out).onclick = () => userForm(null, data);
+    $$('[data-user]', out).forEach(a => a.onclick = e => {
+      e.preventDefault();
+      const u = users.find(x => x.id === a.dataset.user);
+      if (!u.can_manage) { toast(u.id === S.profile.id ? 'This is you. Ask another admin to change your account.' : `Only an admin can change ${u.role} accounts.`, 'bad'); return; }
+      userForm(u, data);
+    });
+  }
+
+  function userForm(u, data) {
+    const roles = data.assignable_roles;
+    const isNew = !u;
+    const body = openModal(isNew ? 'Add User' : `Edit ${u.full_name}`, `
+      <form id="user-form" autocomplete="off">
+        <div class="field"><label for="u-name">Full name</label>
+          <input id="u-name" value="${esc(u?.full_name || '')}" required maxlength="80"></div>
+        ${isNew ? `
+        <div class="field"><label for="u-login">Username or email</label>
+          <input id="u-login" required maxlength="80" autocapitalize="none" spellcheck="false" placeholder="mike.dock">
+          <div class="hint">A username (letters, numbers, dot) is easiest for dock tablets. Use an email for office staff who may want to reset their own password.</div></div>`
+        : `<p class="muted">Sign in: <strong>${esc(u.login)}</strong></p>`}
+        <div class="field"><label for="u-role">Role</label>
+          <select id="u-role">${roles.map(r => `<option value="${r}" ${(u?.role || 'lift') === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
+          <div class="hint" id="u-role-help"></div></div>
+        ${isNew ? `
+        <div class="field"><label for="u-pw">Temporary password</label>
+          <div class="input-scan"><input id="u-pw" value="${makePassword()}" required minlength="6" maxlength="72" autocapitalize="none" spellcheck="false">
+            <button type="button" class="btn secondary" id="u-gen">New</button></div></div>`
+        : `<div class="field"><label class="check"><input type="checkbox" id="u-active" ${u.active ? 'checked' : ''}> Active (can sign in)</label></div>`}
+        <button class="btn block" id="u-save">${isNew ? 'Create Login' : 'Save'}</button>
+      </form>
+      ${isNew ? '' : `
+      <form id="pw-reset" style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px" autocomplete="off">
+        <h3>Reset password</h3>
+        <div class="input-scan"><input id="u-newpw" value="${makePassword()}" minlength="6" maxlength="72" autocapitalize="none" spellcheck="false">
+          <button class="btn secondary" id="u-pwbtn">Set</button></div>
+        <div class="hint">Give the new password to ${esc(u.full_name)}.</div>
+      </form>`}`);
+    const roleSel = $('#u-role', body);
+    const help = () => { $('#u-role-help', body).textContent = ROLE_HELP[roleSel.value] || ''; };
+    roleSel.onchange = help; help();
+    $('#u-gen', body)?.addEventListener('click', () => { $('#u-pw', body).value = makePassword(); });
+
+    $('#user-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#u-save', body), async () => {
+        if (isNew) {
+          const pw = $('#u-pw', body).value;
+          const r = await callAdminUsers({ action: 'create', full_name: $('#u-name', body).value, login: $('#u-login', body).value, role: roleSel.value, password: pw });
+          openModal('Login created', `
+            <p>Give these to <strong>${esc(r.full_name)}</strong>:</p>
+            <dl class="kv" style="font-size:20px"><dt>Sign in</dt><dd>${esc(r.login)}</dd><dt>Password</dt><dd style="font-family:monospace">${esc(pw)}</dd></dl>
+            <p class="muted small">The password is not shown again. You can reset it any time from Users.</p>
+            <button class="btn block" id="u-done">Done</button>`);
+          $('#u-done').onclick = () => { closeModal(); viewSetup('users'); };
+        } else {
+          await callAdminUsers({ action: 'update', id: u.id, full_name: $('#u-name', body).value, role: roleSel.value, active: $('#u-active', body).checked });
+          toast(`${$('#u-name', body).value} saved.`);
+          closeModal(); viewSetup('users');
+        }
+      });
+    };
+    $('#pw-reset', body)?.addEventListener('submit', e => {
+      e.preventDefault();
+      busy($('#u-pwbtn', body), async () => {
+        const pw = $('#u-newpw', body).value;
+        await callAdminUsers({ action: 'set_password', id: u.id, password: pw });
+        toast(`Password set for ${u.full_name}: ${pw}`);
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* REPORTS & EXPORTS (CSV, opens in Excel)                             */
+  /* ------------------------------------------------------------------ */
+  function downloadCsv(filename, headers, rows) {
+    const cell = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const csv = '﻿' + [headers, ...rows].map(r => r.map(cell).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    return rows.length;
+  }
+  const idHeaders = () => idFields().map(f => f.label);
+  const idValues = r => idFields().map(f => r[f.field] || '');
+  const localStamp = () => ymd(new Date());
+
+  async function viewReports() {
+    if (isLift() || !can('viewer')) { location.hash = '#/'; return; }
+    const today = new Date();
+    const first = new Date(today.getFullYear(), today.getMonth(), 1);
+    render(`
+      <a class="back" href="#/">&larr; Home</a>
+      <h1>Reports</h1>
+      <p class="muted">Downloads open in Excel. Customer field names (${esc(idHeaders().concat(lbl.lotShort()).join(', '))}) are used as column headers.</p>
+
+      <div class="card accent">
+        <h2>Inventory on hand</h2>
+        <div class="btn-row">
+          <button class="btn" data-rpt="pallets">By pallet</button>
+          <button class="btn secondary" data-rpt="lots">By item &amp; ${esc(lbl.lotShort().toLowerCase())}</button>
+        </div>
+        <div class="hint">Right now, including allocated quantities and locations.</div>
+      </div>
+
+      <div class="card">
+        <h2>Activity for a date range</h2>
+        <div class="grid2">
+          <div class="field"><label for="r-from">From</label><input id="r-from" type="date" value="${ymd(first)}"></div>
+          <div class="field"><label for="r-to">Through</label><input id="r-to" type="date" value="${ymd(today)}"></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" data-rpt="received">Received pallets</button>
+          <button class="btn" data-rpt="shipped">Shipped pallets</button>
+          <button class="btn secondary" data-rpt="txns">All transactions</button>
+        </div>
+        <div class="hint">Received and shipped list one row per pallet with the receipt / BOL number, for billing and customer questions.</div>
+      </div>
+      <div id="rpt-msg"></div>`);
+
+    const range = () => {
+      const f = $('#r-from').value, t = $('#r-to').value;
+      if (!f || !t || f > t) throw new Error('Pick a valid date range.');
+      return { f, t, from: parseYmd(f).toISOString(), to: addDays(parseYmd(t), 1).toISOString() };
+    };
+    const done = (n, what) => { $('#rpt-msg').innerHTML = `<div class="notice ok">${n} row${n === 1 ? '' : 's'} exported: ${esc(what)}.</div>`; };
+
+    const reports = {
+      pallets: async () => {
+        const rows = await q(sb.from('v_inventory').select('*').order('sku').order('lot_number').order('lp_id'));
+        done(downloadCsv(`inventory-by-pallet-${localStamp()}.csv`,
+          ['WMS Pallet ID', ...idHeaders(), 'SKU', 'Description', lbl.lotShort(), 'Production Date', 'Expiration Date',
+            'Qty On Hand', 'UOM', 'Allocated', 'Available', 'Location', 'Status', 'Received', 'Receipt #'],
+          rows.map(r => [r.lp_id, ...idValues(r), r.sku, r.description, r.lot_number, r.production_date, r.expiration_date,
+            r.qty_on_hand, r.uom, r.qty_allocated, r.qty_available, r.location, r.status, fmtDateTime(r.received_at), r.receipt_no])), 'inventory by pallet');
+      },
+      lots: async () => {
+        const rows = await q(sb.from('v_inventory_by_lot').select('*').order('sku').order('lot_number'));
+        done(downloadCsv(`inventory-by-lot-${localStamp()}.csv`,
+          ['SKU', 'Description', lbl.lotShort(), 'Pallets', 'Qty On Hand', 'Allocated', 'Available', 'UOM', 'Oldest Received'],
+          rows.map(r => [r.sku, r.description, r.lot_number, r.pallets, r.qty_on_hand, r.qty_allocated, r.qty_available, r.uom, fmtDate(r.oldest_received)])),
+          'inventory by item and ' + lbl.lotShort().toLowerCase());
+      },
+      received: async () => {
+        const g = range();
+        const rcpts = await q(sb.from('receipts').select('id, receipt_no, received_at, vendor_name, carrier, trailer_no, po_number, inbound_bol, status')
+          .neq('status', 'void').gte('received_at', g.from).lt('received_at', g.to));
+        const byId = Object.fromEntries(rcpts.map(r => [r.id, r]));
+        const pallets = rcpts.length ? await q(sb.from('pallets')
+          .select('lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, qty_received, status, receipt_id')
+          .in('receipt_id', rcpts.map(r => r.id)).neq('status', 'void').order('lp_id')) : [];
+        done(downloadCsv(`received-${g.f}-to-${g.t}.csv`,
+          ['Received', 'Receipt #', 'Vendor', 'Carrier', 'Trailer #', 'PO #', 'Inbound BOL', 'WMS Pallet ID', ...idHeaders(),
+            'SKU', 'Description', lbl.lotShort(), 'Qty Received', 'UOM'],
+          pallets.map(p => { const r = byId[p.receipt_id], it = itemById(p.item_id);
+            return [fmtDateTime(r.received_at), r.receipt_no, r.vendor_name, r.carrier, r.trailer_no, r.po_number, r.inbound_bol,
+              p.lp_id, ...idValues(p), it.sku, it.description, p.lot_number, p.qty_received, it.uom]; })), 'received pallets');
+      },
+      shipped: async () => {
+        const g = range();
+        const ships = await q(sb.from('shipments').select('id, shipment_no, shipped_at, ship_to_name, ship_to_city, ship_to_state, carrier, pro_number, customer_order_no, po_number')
+          .eq('status', 'shipped').gte('shipped_at', g.from).lt('shipped_at', g.to));
+        const byId = Object.fromEntries(ships.map(s => [s.id, s]));
+        const lines = ships.length ? await q(sb.from('v_shipment_detail').select('*').in('shipment_id', ships.map(s => s.id)).order('lp_id')) : [];
+        done(downloadCsv(`shipped-${g.f}-to-${g.t}.csv`,
+          ['Shipped', 'BOL #', 'Ship To', 'City', 'State', 'Carrier', 'PRO #', 'Order #', 'PO #', 'WMS Pallet ID', ...idHeaders(),
+            'SKU', 'Description', lbl.lotShort(), 'Qty Shipped', 'UOM', 'Weight (lbs)'],
+          lines.map(l => { const s = byId[l.shipment_id];
+            return [fmtDateTime(s.shipped_at), s.shipment_no, s.ship_to_name, s.ship_to_city, s.ship_to_state, s.carrier, s.pro_number,
+              s.customer_order_no, s.po_number, l.lp_id, ...idValues(l), l.sku, l.description, l.lot_number, l.qty, l.uom, l.product_weight_lbs]; })),
+          'shipped pallets');
+      },
+      txns: async () => {
+        const g = range();
+        const rows = await q(sb.from('v_transactions').select('*').gte('created_at', g.from).lt('created_at', g.to).order('id').limit(20000));
+        done(downloadCsv(`transactions-${g.f}-to-${g.t}.csv`,
+          ['When', 'Action', 'WMS Pallet ID', lbl.cust(), 'SKU', lbl.lotShort(), 'Qty Change', 'Qty After', 'From', 'To', 'Receipt #', 'BOL #', 'Reason', 'User'],
+          rows.map(r => [fmtDateTime(r.created_at), r.txn_type, r.lp_id, r.customer_pallet_id, r.sku, r.lot_number, r.qty_change, r.qty_after,
+            r.from_location, r.to_location, r.receipt_no, r.shipment_no, r.reason, r.user_name])), 'transactions');
+      }
+    };
+    $$('[data-rpt]').forEach(b => b.onclick = () => busy(b, reports[b.dataset.rpt]));
+  }
+
+  /* ------------------------------------------------------------------ */
   /* setup: items, locations, customers & vendors, company              */
   /* ------------------------------------------------------------------ */
   async function viewSetup(tab) {
     if (!can('manager')) { location.hash = '#/'; return; }
     await loadRef();
-    const tabs = [['items', 'Items'], ['locations', 'Locations'], ['parties', 'Customers']].concat(can('admin') ? [['company', 'Company']] : []);
+    const tabs = [['items', 'Items'], ['locations', 'Locations'], ['parties', 'Customers'], ['users', 'Users']].concat(can('admin') ? [['company', 'Company']] : []);
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <h1>Setup</h1>
@@ -1907,6 +2154,7 @@
     const out = $('#setup-body');
     if (tab === 'locations') return setupLocations(out);
     if (tab === 'parties') return setupParties(out);
+    if (tab === 'users') return setupUsers(out);
     if (tab === 'company' && can('admin')) return setupCompany(out);
     return setupItems(out);
   }
@@ -2109,13 +2357,17 @@
             <div class="hint">Example: BIN Class. Required or optional is set per item.</div></div>
           <div class="field"><label for="c-custlbl">Customer pallet ID name</label>
             <input id="c-custlbl" value="${esc(s.cust_pallet_label || 'Customer Pallet ID')}" maxlength="30" required>
-            <label class="check" style="margin-top:6px"><input type="checkbox" id="c-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label></div>
+            <div class="row" style="margin-top:6px">
+              <label class="check"><input type="checkbox" id="c-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label>
+              <label class="check"><input type="checkbox" id="c-custbc" ${s.cust_pallet_barcode ? 'checked' : ''}> Barcode on label</label>
+            </div></div>
           ${[1, 2].map(n => `
           <div class="field"><label for="c-ref${n}">Extra identifier ${n} name</label>
             <input id="c-ref${n}" value="${esc(s['ref' + n + '_label'] || '')}" maxlength="30" placeholder="Leave blank to hide">
             <div class="row" style="margin-top:6px">
               <label class="check"><input type="checkbox" id="c-ref${n}req" ${s['ref' + n + '_required'] ? 'checked' : ''}> Required</label>
               <label class="check"><input type="checkbox" id="c-ref${n}uniq" ${s['ref' + n + '_unique'] ? 'checked' : ''}> Unique per pallet</label>
+              <label class="check"><input type="checkbox" id="c-ref${n}bc" ${s['ref' + n + '_barcode'] ? 'checked' : ''}> Barcode on label</label>
             </div></div>`).join('')}
         </div>
         <button class="btn block" id="co-save">Save</button>
@@ -2132,12 +2384,14 @@
           pallet_tare_lbs: Number($('#c-tare', out).value) || 0,
           lot_label: $('#c-lotlbl', out).value.trim() || 'Lot / Production #',
           cust_pallet_label: $('#c-custlbl', out).value.trim() || 'Customer Pallet ID',
-          cust_pallet_required: $('#c-custreq', out).checked
+          cust_pallet_required: $('#c-custreq', out).checked,
+          cust_pallet_barcode: $('#c-custbc', out).checked
         };
         for (const n of [1, 2]) {
           row['ref' + n + '_label'] = strOrNull($('#c-ref' + n, out).value);
           row['ref' + n + '_required'] = $('#c-ref' + n + 'req', out).checked;
           row['ref' + n + '_unique'] = $('#c-ref' + n + 'uniq', out).checked;
+          row['ref' + n + '_barcode'] = $('#c-ref' + n + 'bc', out).checked;
         }
         if (!hasPallets) row.lp_prefix = $('#c-prefix', out).value.trim().toUpperCase();
         await q(sb.from('settings').update(row).eq('id', 1));

@@ -3,7 +3,12 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.5.0 includes:**
+**v0.6.0 includes:**
+- **Users screen** (Setup > Users): admins and managers create logins (simple
+  usernames for dock staff), change roles, deactivate, and reset passwords.
+- **Reports:** Excel-ready exports of inventory, received, shipped, and all
+  transactions.
+- **Identifier barcodes** on pallet labels (per field, Setup > Company).
 - **Schedule:** a daily and weekly calendar of inbound and outbound loads, with
   late flags. It refreshes every minute.
 - **LWH branding** in the app header, name, and icon.
@@ -18,8 +23,8 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, customers & vendors, company info, pallet
   identifiers.
 
-> **Database:** migrations 001–006 are all applied. v0.5 needs no database
-> change.
+> **Database:** migrations 001–007 and the `admin-users` Edge Function are
+> deployed to Offsite WMS.
 
 ## Files
 
@@ -43,19 +48,27 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
    Password-reset emails won't work without this step.
 
-## Adding a user
+## Users
 
-1. In Supabase, open Authentication > Users > Add user > Create new user. Enter
-   their email and a temporary password, and check **Auto Confirm User**.
-2. Run this in the SQL Editor:
+**Setup > Users**, for admins and managers:
+- **Add User:** name, a **username** (e.g. `mike.dock`) or an email, a role,
+  and a temporary password. The login and password are shown once to hand to
+  the person.
+- **Usernames:** these sign in as typed. In the background they map to
+  `username@wms.logistics-warehouse.com`; no email is ever sent.
+- **Edit:** change the name or role, **deactivate** (blocks sign-in at once), or
+  reactivate.
+- **Reset password:** sets a new password for that person.
 
-```sql
-insert into public.app_users (id, full_name, role)
-select id, 'Full Name', 'operator'      -- admin | manager | operator | viewer
-from auth.users where email = 'person@example.com';
-```
+Who can do what:
+- **Admins** manage everyone.
+- **Managers** manage operator, lift, and viewer logins only.
+- **Nobody** can change their own role or deactivate themselves.
 
-To deactivate someone: `update app_users set active = false where full_name = '...';`
+All of this runs through the `admin-users` Edge Function
+(`supabase/functions/admin-users`). It uses the project's secret key
+server-side and checks the caller on every request. The rules live in
+`users-core.js`.
 
 | Role | Can |
 |---|---|
@@ -103,6 +116,17 @@ identifiers you name in **Setup > Company > Pallet Identifiers**:
 Tapping an entry opens it. Office users go to the receipt or shipment, and lift
 users go straight to the Dock screen. Filter by In/Out. The page refreshes every
 minute, so it works as a wall display on a dock TV.
+
+## Reports
+
+**Home > Reports** downloads CSV files that open in Excel. Column headers use
+the customer's field names (BIN Class, Pallet ID, PGID, ...).
+- **Inventory on hand:** by pallet, or by item and lot.
+- **Received pallets** (date range): one row per pallet, with receipt #,
+  vendor, carrier, and PO.
+- **Shipped pallets** (date range): one row per pallet, with BOL #, ship-to,
+  PRO, order #, and weight.
+- **All transactions** (date range): the full audit trail.
 
 ## Branding
 
@@ -168,7 +192,9 @@ receipts. Customers will fill in the ship-to on shipments and BOLs.
 
 - **Labels:** 4x6 inches, one pallet per page. Set the label printer's paper
   size to 4x6 and scale to 100% (turn off "fit to page"). Each label carries
-  Code 128 barcodes for the pallet ID and the lot.
+  Code 128 barcodes for the WMS pallet ID and the lot. You can add barcodes for
+  the customer pallet ID and the extra identifiers under **Setup > Company >
+  Barcode on label**.
 - **Receipts:** letter size. Use "Save as PDF" in the print dialog to email one.
 
 ## Scanning
