@@ -3913,11 +3913,15 @@
           <span class="muted">${rows.length} row${rows.length === 1 ? '' : 's'}: ${counts.new} new${counts.update ? `, ${counts.update} update` : ''}${counts.skip ? `, ${counts.skip} skip` : ''}${counts.error ? `, <strong style="color:var(--bad)">${counts.error} with errors</strong>` : ''}</span></div>
         ${unused.length ? `<p class="muted small">Columns not used: ${esc(unused.join(', '))}</p>` : ''}
         ${newLocs.length ? `<p class="small">Will create ${newLocs.length} location${newLocs.length === 1 ? '' : 's'}: ${esc(newLocs.slice(0, 20).join(', '))}${newLocs.length > 20 ? '…' : ''}</p>` : ''}
-        ${counts.error ? '<div class="notice warn">Rows with errors are skipped. Fix them in the sheet and check again, or import the good rows now.</div>' : ''}
+        ${counts.error ? `<div class="notice warn"><strong>Why rows were flagged:</strong><ul style="margin:6px 0 4px 18px;padding:0">${
+          Object.entries(rows.filter(r => r.error).reduce((m, r) => { const k = r.error.replace(/\b[A-Z0-9-]{6,}\b/g, '…'); (m[k] = m[k] || []).push(r.line); return m; }, {}))
+            .sort((a, b) => b[1].length - a[1].length).slice(0, 6)
+            .map(([msg, lines]) => `<li>${esc(rows.find(r => r.line === lines[0]).error)}${lines.length > 1 ? ` <span class="muted">(${lines.length} rows${lines.length > 1 ? ', e.g. row ' + lines[0] : ''})</span>` : ` <span class="muted">(row ${lines[0]})</span>`}</li>`).join('')}</ul>
+          Rows with errors are skipped. Fix them and check again, or import the good rows now.</div>` : ''}
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Row</th><th>Result</th>${shownCols.map(k => `<th>${esc(cols.find(c => c[0] === k)[1])}</th>`).join('')}<th>Problem</th></tr></thead>
+          <thead><tr><th>Row</th><th>Result</th>${counts.error || counts.skip ? '<th>Problem</th>' : ''}${shownCols.map(k => `<th>${esc(cols.find(c => c[0] === k)[1])}</th>`).join('')}</tr></thead>
           <tbody>${rows.slice(0, 300).map(r => `<tr class="${r.action === 'error' ? 'imp-err' : ''}"><td>${r.line}</td><td>${badge2(r.action)}</td>
-            ${shownCols.map(k => `<td>${esc(get(r.raw, k))}</td>`).join('')}<td>${esc(r.error || r.skipReason || '')}</td></tr>`).join('')}</tbody>
+            ${counts.error || counts.skip ? `<td class="imp-why">${esc(r.error || r.skipReason || '')}</td>` : ''}${shownCols.map(k => `<td>${esc(get(r.raw, k))}</td>`).join('')}</tr>`).join('')}</tbody>
         </table></div>
         ${rows.length > 300 ? `<p class="muted small">Showing the first 300 rows of ${rows.length}.</p>` : ''}
         <div class="btn-row">

@@ -494,3 +494,4 @@ body.theme-modern .big-input { border: 2px solid #111; }
 
 /* import */
 tr.imp-err td { background: var(--bad-bg); }
+td.imp-why { min-width: 220px; max-width: 360px; white-space: normal; font-weight: 600; color: var(--bad); }
