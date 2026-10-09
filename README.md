@@ -3,7 +3,25 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v1.1.0 adds:**
+**v1.2.0 adds subcustomers and load parties:**
+- **Master bill-to accounts** (Setup > Accounts > Bills to):
+  - **Subcustomers:** a plant or location bills to a master account. Each
+    plant keeps its own items, inventory, receipts and shipments.
+  - **Statements:** the master gets one statement, with a section per plant.
+    Billing lists masters only, and a month closes for the master and all its
+    plants together.
+  - **Rates:** plants use the master's rates unless they have their own (shown
+    in gray in Rates). Monthly space and flat fees are never copied. The
+    master's accessorial prices fill in plant charges.
+- **Shipper / Consignee / Bill-to** show on every receipt and shipment, and the
+  bill-to prints on receipts and BOLs. A BOL's Ship From reads "*Customer*, c/o
+  *warehouse*".
+- **Carrier arranged by:** Customer (pickup / their own carrier, the default,
+  freight collect) or Logistics Warehouse (prepaid). On our trucks the load
+  prompts for a **Freight** charge, which bills to the master.
+- **Modern theme:** darker card outlines.
+
+**v1.1.0 added:**
 - **Spreadsheet import** (Setup > Import, managers): items, ship-to & vendors,
   accounts, locations, and **opening inventory**.
   - **Input:** a CSV or Excel file, or rows pasted straight from Excel or Google
@@ -105,8 +123,9 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–012 and the `admin-users` Edge Function, all
-> applied to Offsite WMS.
+> **Database:** migrations 001–013 and the `admin-users` Edge Function.
+> **v1.2 needs migration 013** (`supabase/migrations/013_subcustomers.sql`) run
+> before the new app files go live.
 
 ## Files
 

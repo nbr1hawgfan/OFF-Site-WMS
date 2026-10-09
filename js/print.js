@@ -119,7 +119,7 @@ const WmsPrint = (() => {
   }
 
   /* receipt: header row; pallets: active pallets with sku/description/uom */
-  function receipt(rcpt, pallets, settings, owner) {
+  function receipt(rcpt, pallets, settings, owner, billTo) {
     const s = settings || {};
     const company = esc((s.company_name || '').replace(/_/g, ' '));
     const addr = [s.address_line1, s.address_line2, [s.city, s.state].filter(Boolean).join(', ') + (s.zip ? ' ' + s.zip : '')]
@@ -171,6 +171,8 @@ const WmsPrint = (() => {
         </div>
         <div class="rc-info">
           <div><span>Customer account</span>${esc(owner ? owner.code + ' — ' + owner.name : '')}</div>
+          <div><span>Bill-to</span>${esc(billTo && billTo.code ? billTo.code + ' — ' + billTo.name : (owner ? owner.code : ''))}</div>
+          <div><span>Carrier arranged by</span>${rcpt.carrier_by === 'lwh' ? 'Logistics Warehouse' : 'Customer / shipper'}</div>
           <div><span>Received</span>${esc(fmtDateTime(rcpt.received_at))}</div>
           <div><span>From / Vendor</span>${esc(rcpt.vendor_name || '')}</div>
           <div><span>PO #</span>${esc(rcpt.po_number || '')}</div>
@@ -207,7 +209,7 @@ const WmsPrint = (() => {
   }
 
   /* Straight bill of lading (letter). lines: v_shipment_detail rows */
-  function bol(ship, lines, settings, owner) {
+  function bol(ship, lines, settings, owner, billTo) {
     const s = settings || {};
     const tare = Number(s.pallet_tare_lbs || 0);
     const company = esc((s.company_name || '').replace(/_/g, ' '));
@@ -277,7 +279,7 @@ const WmsPrint = (() => {
 
         <table class="sec">
           <tr>
-            <td style="width:50%"><span class="cap">Ship From</span><span class="big">${company}</span><br>${fromAddr}${s.phone ? '<br>' + esc(s.phone) : ''}</td>
+            <td style="width:50%"><span class="cap">Ship From</span>${owner && owner.name ? `<span class="big">${esc(owner.name)}</span><br>c/o ${company}` : `<span class="big">${company}</span>`}<br>${fromAddr}${s.phone ? '<br>' + esc(s.phone) : ''}</td>
             <td><span class="cap">Date</span>${esc(fmtDate(ship.ship_date))}${ship.appt_time ? ' &nbsp; Appt ' + esc(fmtTimeStr(ship.appt_time)) : ''}<br>
               <span class="cap" style="margin-top:4pt">Carrier Name</span>${esc(ship.carrier || '')}</td>
           </tr>
@@ -295,7 +297,8 @@ const WmsPrint = (() => {
           <tr>
             <td><span class="cap">Third Party Freight Charges Bill To</span>${esc(ship.third_party_bill_to || '').replace(/\n/g, '<br>')}</td>
             <td><span class="cap">Freight Charge Terms</span>
-              ${box(ship.freight_terms === 'prepaid')} Prepaid &nbsp; ${box(ship.freight_terms === 'collect')} Collect &nbsp; ${box(ship.freight_terms === 'third_party')} 3rd Party</td>
+              ${box(ship.freight_terms === 'prepaid')} Prepaid &nbsp; ${box(ship.freight_terms === 'collect')} Collect &nbsp; ${box(ship.freight_terms === 'third_party')} 3rd Party
+              ${ship.carrier_by !== 'lwh' ? '<br><span style="font-size:8.5pt">Customer pickup: carrier arranged by customer</span>' : ''}</td>
           </tr>
           <tr><td colspan="2"><span class="cap">Special Instructions</span>${esc(ship.special_instructions || '')}</td></tr>
         </table>
@@ -303,7 +306,7 @@ const WmsPrint = (() => {
         <table class="sec">
           <thead><tr><th>Customer Order #</th><th class="num"># Pkgs</th><th class="num">Weight (lbs)</th><th class="center">Pallet/Slip</th><th>Additional Shipper Info</th></tr></thead>
           <tbody><tr><td>${esc(ship.customer_order_no || '')}</td><td class="num">${esc(totQty)}</td><td class="num">${esc(wt(totWeight))}</td>
-            <td class="center">${totHU ? 'Y' : 'N'}</td><td>${esc([ship.po_number && 'PO ' + ship.po_number, owner && 'Acct ' + owner.code].filter(Boolean).join(' · '))}</td></tr></tbody>
+            <td class="center">${totHU ? 'Y' : 'N'}</td><td>${esc([ship.po_number && 'PO ' + ship.po_number, owner && 'Acct ' + owner.code, billTo && billTo.code && owner && billTo.code !== owner.code && 'Bill-to ' + billTo.code].filter(Boolean).join(' · '))}</td></tr></tbody>
         </table>
 
         <table class="sec">
@@ -453,7 +456,6 @@ const WmsPrint = (() => {
     const rate = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
     const lines = st.lines || [];
     const showWh = lines.some(l => l.warehouse_code) && new Set(lines.map(l => l.warehouse_code).filter(Boolean)).size > 1;
-    const cats = [...new Set(lines.map(l => l.category))];
     const billTo = [owner.name, owner.contact_name ? 'Attn: ' + owner.contact_name : '', owner.billing_address]
       .filter(Boolean).map(x => esc(x).replace(/\n/g, '<br>')).join('<br>');
     const html = `
@@ -473,6 +475,8 @@ const WmsPrint = (() => {
         .st th { font-size: 8pt; text-transform: uppercase; background: #eee; }
         .st .num { text-align: right; white-space: nowrap; }
         .st .sub td { font-weight: 700; border-bottom: 1pt solid #000; }
+        .st-acct { display: flex; gap: 8pt; align-items: baseline; margin: 14pt 0 2pt; padding: 4pt 6pt; background: #111; color: #fff; font-size: 11pt; }
+        .st-acct span { font-weight: 800; } .st-acct b { margin-left: auto; }
         .st-total { margin-top: 12pt; display: flex; justify-content: flex-end; }
         .st-total div { border-top: 2pt solid #000; padding-top: 4pt; font-size: 14pt; font-weight: 800; min-width: 2.6in; display: flex; justify-content: space-between; }
         .st-foot { margin-top: 18pt; font-size: 8pt; color: #555; }
@@ -489,8 +493,12 @@ const WmsPrint = (() => {
           <div><span>Account</span>${esc(owner.code)}</div>
           <div><span>Period</span>${esc(monthLabel)}</div>
         </div>
-        ${lines.length ? cats.map(c => {
-          const rows = lines.filter(l => l.category === c);
+        ${lines.length ? [...new Set(lines.map(l => l.account_code || owner.code))].map(code => {
+          const al = lines.filter(l => (l.account_code || owner.code) === code);
+          const multi = new Set(lines.map(l => l.account_code || owner.code)).size > 1;
+          return (multi ? `<div class="st-acct"><span>${esc(code)}</span> ${esc((al[0] || {}).account_name || '')}<b>${money(al.reduce((a, l) => a + Number(l.amount), 0))}</b></div>` : '')
+            + [...new Set(al.map(l => l.category))].map(c => {
+          const rows = al.filter(l => l.category === c);
           const sub = rows.reduce((a, l) => a + Number(l.amount), 0);
           return `<h2>${esc(c)}</h2>
           <table style="table-layout:fixed">
@@ -501,6 +509,7 @@ const WmsPrint = (() => {
               <td class="num">${rate(l.rate)}</td><td class="num">${money(l.amount)}</td></tr>`).join('')}
               <tr class="sub"><td colspan="${showWh ? 6 : 5}">${esc(c)} subtotal</td><td class="num">${money(sub)}</td></tr></tbody>
           </table>`;
+        }).join('');
         }).join('') : '<p>No charges this period.</p>'}
         <div class="st-total"><div><span>Total</span><span>${money(st.total)}</span></div></div>
         <div class="st-foot">Printed ${esc(fmtDateTime(new Date()))}</div>

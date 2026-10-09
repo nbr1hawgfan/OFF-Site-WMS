@@ -429,7 +429,7 @@ a.kpi:hover { border-color: #b9b9c0; }
 body.theme-modern {
   --accent: #00667D; --accent-dark: #004f61; --accent-tint: #e6f0f2;
   --red: var(--accent); --red-dark: var(--accent-dark); --black: #111111;
-  --line: #e2e2e0; --bg: #ffffff; --card: #ffffff; --muted: #5c5c59; --radius: 0px;
+  --line: #9a9a95; --bg: #ffffff; --card: #ffffff; --muted: #5c5c59; --radius: 0px;
 }
 body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 3px solid var(--accent); }
 body.theme-modern .brand { color: #111; }
@@ -439,7 +439,9 @@ body.theme-modern .header-right button { color: #111; border: 1px solid #111; bo
 body.theme-modern .wh-switch { background: #fff; color: #111; border: 1px solid #111; border-radius: 0; }
 body.theme-modern .wh-tag { background: var(--accent); color: #fff; border-radius: 0; letter-spacing: 1.5px; }
 body.theme-modern #hdr-wx:not(:empty) { border-right-color: #cfcfcc; }
-body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile, body.theme-modern .week-day { border-radius: 0; box-shadow: none; }
+body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile, body.theme-modern .week-day { border-radius: 0; box-shadow: none; border-color: var(--line); }
+body.theme-modern .parties, body.theme-modern .st-acct { border-radius: 0; }
+body.theme-modern .st-acct { background: var(--accent); }
 body.theme-modern .card.accent { border-top: 3px solid var(--accent); }
 body.theme-modern .tile { border-left: 4px solid var(--accent); }
 body.theme-modern .btn, body.theme-modern input, body.theme-modern select, body.theme-modern textarea, body.theme-modern .tabs a,
@@ -470,6 +472,8 @@ body.theme-modern .big-input { border: 2px solid #111; }
   body.theme-modern.office .kpi-value, body.theme-modern.office .big-money { font-weight: 300; }
   body.theme-modern.office .kpi-label, body.theme-modern.office table.data th { letter-spacing: 1.2px; font-weight: 600; }
   body.theme-modern.office .card, body.theme-modern.office .kpi { border-color: var(--line); }
+  body.theme-modern.office .card.accent { border-top-color: var(--accent); }
+  body.theme-modern.office table.data th, body.theme-modern.office table.data td { border-bottom-color: #d4d4cf; }
   body.theme-modern.office .sidenav { background: #fff; border-right: 1px solid #e2e2e0; padding-top: 18px; }
   body.theme-modern.office .sidenav a { color: #444; font-weight: 500; border-radius: 0; letter-spacing: .3px; }
   body.theme-modern.office .sidenav a:hover { background: #f4f4f2; color: #111; }
@@ -477,6 +481,16 @@ body.theme-modern .big-input { border: 2px solid #111; }
   body.theme-modern.office .nav-foot { color: #77776f; }
   body.theme-modern.office .view { padding-top: 28px; }
 }
+
+/* load parties (Shipper / Consignee / Bill-to) */
+.parties { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 4px 0 12px; padding: 10px 12px; background: #f6f6f8; border: 1px solid var(--line); border-radius: 8px; font-size: 15px; }
+@media (min-width: 620px) { .parties { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.parties span { display: block; font-size: 12px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+/* statement: a band per subcustomer */
+.st-acct { display: flex; gap: 10px; align-items: baseline; margin: 16px 0 8px; padding: 8px 12px; background: var(--black); color: #fff; border-radius: 6px; }
+.st-acct span { font-weight: 800; letter-spacing: .5px; }
+.st-acct strong { margin-left: auto; }
+.list-item.sub-acct { margin-left: 22px; }
 
 /* import */
 tr.imp-err td { background: var(--bad-bg); }

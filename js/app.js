@@ -104,6 +104,32 @@
     if (!l.code) return '';
     return multiWh() && l.warehouse_id !== S.whId ? `${whById(l.warehouse_id).code} ${l.code}` : l.code;
   }
+  // subcustomers bill to a master account; a master (or any account without one) bills itself
+  function billToOf(ownerId) { const o = ownerById(ownerId); return o.bill_to_id ? ownerById(o.bill_to_id) : o; }
+  const isMaster = o => !o.bill_to_id;
+  const subsOf = id => (S.owners || []).filter(o => o.bill_to_id === id);
+  const CARRIER_BY = { customer: 'Customer (pickup / their carrier, no freight)', lwh: 'Logistics Warehouse (we haul; bill freight)' };
+  // Shipper / Consignee / Bill-to for a load
+  function partiesHtml(kind, r, ownerId) {
+    const o = ownerById(ownerId), bt = billToOf(ownerId), w = whById(r.warehouse_id || S.whId);
+    const site = `${companyName()}${w.code && multiWh() ? ' ' + w.code : ''}`;
+    const acct = o.id ? `${o.code} — ${o.name}` : 'pick an account';
+    const cells = kind === 'in'
+      ? [['Shipper', r.vendor_name || 'Vendor / plant below'], ['Consignee', `${site}, c/o ${acct}`]]
+      : [['Shipper', `${acct}, c/o ${site}`], ['Consignee', r.ship_to_name || 'Ship-to below']];
+    cells.push(['Bill-to', bt.id ? `${bt.code} — ${bt.name}${bt.id !== o.id ? ' (master)' : ''}` : '-']);
+    return cells.map(([k, v]) => `<div><span>${k}</span>${esc(v)}</div>`).join('');
+  }
+  function wirePartiesBox(root, kind, r) {
+    const box = $('#parties-box', root);
+    if (!box) return;
+    const redraw = () => {
+      const cur = { ...r, vendor_name: $('#vendor_name', root)?.value ?? r.vendor_name, ship_to_name: $('#ship_to_name', root)?.value ?? r.ship_to_name };
+      box.innerHTML = partiesHtml(kind, cur, $('#owner_id', root)?.value || r.owner_id);
+    };
+    ['#owner_id', '#vendor_name', '#ship_to_name', '#consignee_id'].forEach(sel => $(sel, root)?.addEventListener('input', redraw));
+    ['#owner_id', '#consignee_id'].forEach(sel => $(sel, root)?.addEventListener('change', () => setTimeout(redraw, 0)));
+  }
   function itemsFor(ownerId) { return S.items.filter(i => i.active && (!ownerId || i.owner_id === ownerId)); }
   function ownerOptions(selectedId) {
     const list = activeOwners();
@@ -616,7 +642,7 @@
         oldest: p.length ? Math.max(...p.map(x => daysOld(x.received_at))) : null,
         in30: received.filter(r => r.owner_id === o.id).length,
         out30: shipped.filter(s => s.owner_id === o.id).reduce((a, s) => a + shipPallets(s), 0),
-        bill: D.bill ? Number((D.bill.find(r => r.owner_id === o.id) || {}).total || 0) : null
+        bill: D.bill && isMaster(o) ? Number((D.bill.find(r => r.owner_id === o.id) || {}).total || 0) : null
       };
     }).sort((a, b) => b.pallets - a.pallets || a.o.code.localeCompare(b.o.code));
 
@@ -645,7 +671,7 @@
       <${href ? `a href="${href}"` : 'div'} class="kpi">
         <div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ''}
       </${href ? 'a' : 'div'}>`;
-    const showBill = D.bill !== null;
+    const showBill = D.bill !== null && (!acct || isMaster(ownerById(acct)));   // a subcustomer's charges are on its master's statement
 
     render(`
       <div id="dash">
@@ -703,7 +729,7 @@
                 <td><strong>${esc(r.o.code)}</strong> <span class="muted">${esc(r.o.name)}</span></td>
                 <td class="num">${r.pallets.toLocaleString()}</td><td class="num">${r.hold || '-'}</td><td class="num">${r.skus}</td>
                 <td class="num">${esc(r.qty)}</td><td class="num">${r.oldest === null ? '-' : r.oldest + ' days'}</td>
-                <td class="num">${r.in30}</td><td class="num">${r.out30}</td>${showBill ? `<td class="num">${money(r.bill)}</td>` : ''}</tr>`).join('')
+                <td class="num">${r.in30}</td><td class="num">${r.out30}</td>${showBill ? `<td class="num">${r.bill === null ? `<span class="muted">→ ${esc(billToOf(r.o.id).code)}</span>` : money(r.bill)}</td>` : ''}</tr>`).join('')
                 || `<tr><td colspan="9" class="muted">No accounts yet.</td></tr>`}</tbody>
             </table></div>
             ${multiOwner() && !acct ? '<p class="muted small" style="margin:8px 0 0">Click an account to focus the dashboard on it.</p>' : ''}
@@ -921,7 +947,9 @@
           <input id="expected_at" type="datetime-local" value="${r.expected_at ? esc(toLocalInput(r.expected_at)) : ''}"></div>
         <div class="field"><label for="dock_door">Dock door</label>
           <input id="dock_door" value="${esc(r.dock_door || '')}" maxlength="20"></div>
-        <div class="field"><label for="vendor_name">From / Vendor</label>
+        <div class="field"><label for="carrier_by">Carrier arranged by</label>
+          <select id="carrier_by">${Object.entries(CARRIER_BY).map(([k, v]) => `<option value="${k}" ${(r.carrier_by || 'customer') === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></div>
+        <div class="field"><label for="vendor_name">Shipper (from / vendor)</label>
           <input id="vendor_name" value="${esc(r.vendor_name || '')}" maxlength="120" list="vendor-list" autocomplete="off">
           <datalist id="vendor-list">${vendorSuggestions.map(v => `<option value="${esc(v)}"></option>`).join('')}</datalist></div>
         <div class="field"><label for="carrier">Carrier</label>
@@ -936,7 +964,8 @@
           <input id="inbound_bol" value="${esc(r.inbound_bol || '')}" maxlength="60"></div>
       </div>
       <div class="field"><label for="notes">Notes</label>
-        <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>`;
+        <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>
+      <div class="parties" id="parties-box">${partiesHtml('in', r, r.owner_id || (activeOwners().length === 1 ? activeOwners()[0].id : ''))}</div>`;
   }
   // saved vendors first, then names typed on recent receipts
   let vendorSuggestions = [];
@@ -968,6 +997,7 @@
       ...(!$('#owner_id', root).disabled ? { owner_id: v('owner_id') || null } : {}),
       expected_at: v('expected_at') ? new Date(v('expected_at')).toISOString() : null,
       dock_door: strOrNull(v('dock_door')),
+      carrier_by: v('carrier_by') || 'customer',
       vendor_name: savedVendorName(strOrNull(v('vendor_name'))),
       vendor_id: vendorIdFor(strOrNull(v('vendor_name'))),
       carrier: strOrNull(v('carrier')),
@@ -993,6 +1023,7 @@
         ${receiptHeaderFields({}, true)}
         <button class="btn block" id="create-btn">Create Receipt</button>
       </form>`);
+    wirePartiesBox($('#new-rcpt'), 'in', {});
     $('#new-rcpt').onsubmit = e => {
       e.preventDefault();
       busy($('#create-btn'), async () => {
@@ -1173,8 +1204,9 @@
 
     const page = $('#rcpt-page');
     wireScanButtons(page);
+    if ($('#hdr-form', page)) wirePartiesBox($('#hdr-form', page), 'in', rcpt);
     const reload = fid => viewReceipt(id, fid, dockMode);
-    wireCharges($('#charges-card', page), { receipt_id: id, owner_id: rcpt.owner_id, warehouse_id: rcpt.warehouse_id });
+    wireCharges($('#charges-card', page), { receipt_id: id, owner_id: rcpt.owner_id, warehouse_id: rcpt.warehouse_id, carrier_by: rcpt.carrier_by });
 
     /* header save */
     $('#hdr-form', page)?.addEventListener('submit', e => {
@@ -1295,7 +1327,7 @@
 
     /* receipt actions */
     $('#print-rcpt', page)?.addEventListener('click', () =>
-      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id), ownerById(rcpt.owner_id)));
+      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id), ownerById(rcpt.owner_id), billToOf(rcpt.owner_id)));
     $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id), ownerById(rcpt.owner_id)));
     $('#done-unload', page)?.addEventListener('click', async () => {
       const ok = await askConfirm('Done unloading?',
@@ -2256,7 +2288,8 @@
   /* ------------------------------------------------------------------ */
   function shipmentHeaderFields(r = {}, lockScope = false) {
     const customers = S.parties.filter(p => p.active && p.party_type !== 'vendor');
-    const terms = r.freight_terms || 'prepaid';
+    const carrierBy = r.carrier_by || 'customer';
+    const terms = r.freight_terms || (carrierBy === 'customer' ? 'collect' : 'prepaid');
     return `
       <div class="grid2">
         <div class="field"><label for="owner_id">Customer account (whose product)</label>
@@ -2292,6 +2325,8 @@
           <input id="appt_time" type="time" value="${esc((r.appt_time || '').slice(0, 5))}"></div>
         <div class="field"><label for="dock_door">Dock door</label>
           <input id="dock_door" value="${esc(r.dock_door || '')}" maxlength="20"></div>
+        <div class="field"><label for="carrier_by">Carrier arranged by</label>
+          <select id="carrier_by">${Object.entries(CARRIER_BY).map(([k, v]) => `<option value="${k}" ${carrierBy === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></div>
         <div class="field"><label for="carrier">Carrier</label><input id="carrier" value="${esc(r.carrier || '')}" maxlength="120"></div>
         <div class="field"><label for="carrier_scac">SCAC</label><input id="carrier_scac" value="${esc(r.carrier_scac || '')}" maxlength="4"></div>
         <div class="field"><label for="trailer_no">Trailer #</label><input id="trailer_no" value="${esc(r.trailer_no || '')}" maxlength="40"></div>
@@ -2310,7 +2345,8 @@
       <div class="field"><label for="special_instructions">Special instructions (prints on BOL)</label>
         <textarea id="special_instructions" maxlength="600">${esc(r.special_instructions || '')}</textarea></div>
       <div class="field"><label for="notes">Internal notes</label>
-        <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>`;
+        <textarea id="notes" maxlength="1000">${esc(r.notes || '')}</textarea></div>
+      <div class="parties" id="parties-box">${partiesHtml('out', r, r.owner_id || (activeOwners().length === 1 ? activeOwners()[0].id : ''))}</div>`;
   }
 
   function wireShipmentHeader(root) {
@@ -2326,6 +2362,12 @@
     $('#freight_terms', root).addEventListener('change', e => {
       $('#tp-wrap', root).hidden = e.target.value !== 'third_party';
     });
+    // customer pickup is normally freight collect; our truck is prepaid (we bill the freight)
+    $('#carrier_by', root).addEventListener('change', e => {
+      const ft = $('#freight_terms', root);
+      if (ft.value !== 'third_party') { ft.value = e.target.value === 'lwh' ? 'prepaid' : 'collect'; ft.dispatchEvent(new Event('change')); }
+    });
+    wirePartiesBox(root, 'out', {});
   }
 
   function readShipmentHeader(root) {
@@ -2341,7 +2383,7 @@
       ship_date: v('ship_date'), appt_time: v('appt_time') || null, dock_door: strOrNull(v('dock_door')),
       carrier: strOrNull(v('carrier')), carrier_scac: strOrNull(v('carrier_scac').toUpperCase()),
       trailer_no: strOrNull(v('trailer_no')), seal_no: strOrNull(v('seal_no')), pro_number: strOrNull(v('pro_number')),
-      freight_terms: v('freight_terms'),
+      freight_terms: v('freight_terms'), carrier_by: v('carrier_by') || 'customer',
       third_party_bill_to: v('freight_terms') === 'third_party' ? strOrNull(v('third_party_bill_to')) : null,
       customer_order_no: strOrNull(v('customer_order_no')), po_number: strOrNull(v('po_number')),
       special_instructions: strOrNull(v('special_instructions')), notes: strOrNull(v('notes'))
@@ -2504,7 +2546,7 @@
     const page = $('#ship-page');
     wireScanButtons(page);
     const reload = focus => viewShipment(id, focus);
-    wireCharges($('#charges-card', page), { shipment_id: id, owner_id: ship.owner_id, warehouse_id: ship.warehouse_id });
+    wireCharges($('#charges-card', page), { shipment_id: id, owner_id: ship.owner_id, warehouse_id: ship.warehouse_id, carrier_by: ship.carrier_by });
 
     const hdr = $('#ship-hdr', page);
     if (hdr) {
@@ -2570,7 +2612,7 @@
       toast('Pallet removed.');
     }));
 
-    $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id), ownerById(ship.owner_id));
+    $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id), ownerById(ship.owner_id), billToOf(ship.owner_id));
     $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, docSettings(ship.warehouse_id), ownerById(ship.owner_id)));
 
     $('#ol-form', page)?.addEventListener('submit', e => {
@@ -2762,6 +2804,7 @@
     return `${ym}-${pad2(new Date(y, m, 0).getDate())}`;
   }
   function chargeTypeById(id) { return (S.chargeTypes || []).find(t => t.id === id) || {}; }
+  function chargeTypeByCode(code) { return (S.chargeTypes || []).find(t => t.active && t.code === code) || {}; }
 
   const RATE_GROUPS = [
     { title: 'Handling', note: 'Most contracts pay in and out together up front: put the whole fee on Inbound and leave Outbound blank.',
@@ -2786,10 +2829,13 @@
       card.innerHTML = `
         <div class="row spread"><h2 style="margin:0">Charges</h2>
           <button class="btn sm secondary" id="add-charge" type="button">Add Charge</button></div>
-        <p class="muted small" style="margin:6px 0 0">Extras for this load: admin, special handling, after hours. Handling and storage are added automatically on the monthly statement.</p>
+        <p class="muted small" style="margin:6px 0 0">Extras for this load: admin, special handling, after hours, freight. Handling and storage are added automatically on the monthly statement${billToOf(ctx.owner_id).id && billToOf(ctx.owner_id).id !== ctx.owner_id ? ` (billed to ${esc(billToOf(ctx.owner_id).code)})` : ''}.</p>
+        ${ctx.carrier_by === 'lwh' && !rows.some(r => chargeTypeById(r.charge_type_id).code === 'FREIGHT') && chargeTypeByCode('FREIGHT').id
+          ? `<div class="notice warn" style="margin:10px 0 0">Logistics Warehouse is hauling this load. <a href="#" id="add-freight"><strong>Add the freight charge</strong></a></div>` : ''}
         ${rows.length ? `<div style="margin-top:10px">${rows.map(chargeRow).join('')}</div>
           <div class="row spread" style="margin-top:8px"><strong>Total</strong><strong>${money(total)}</strong></div>` : ''}`;
       $('#add-charge', card).onclick = () => busy(null, () => chargeForm(ctx, draw));
+      $('#add-freight', card)?.addEventListener('click', e => { e.preventDefault(); busy(null, () => chargeForm({ ...ctx, typeCode: 'FREIGHT' }, draw)); });
       wireChargeRemove(card, rows, draw);
     };
     await draw().catch(e => { if (card.isConnected) card.innerHTML = `<div class="notice bad">${esc(friendly(e))}</div>`; });
@@ -2822,13 +2868,16 @@
   async function chargeForm(ctx, after) {
     const types = (S.chargeTypes || []).filter(t => t.active);
     if (!types.length) throw new Error('No charge types are set up. A manager can add them under Billing > Charge Types.');
-    const rates = await q(sb.from('account_rates').select('charge_type_id, rate').eq('owner_id', ctx.owner_id).eq('basis', 'manual'));
-    const rateFor = id => { const r = rates.find(x => x.charge_type_id === id); return r ? Number(r.rate) : Number(chargeTypeById(id).default_rate || 0); };
+    const master = billToOf(ctx.owner_id).id;
+    const rates = await q(sb.from('account_rates').select('owner_id, charge_type_id, rate').in('owner_id', [...new Set([ctx.owner_id, master].filter(Boolean))]).eq('basis', 'manual'));
+    // the account's own price, else its bill-to master's, else the standard rate
+    const rateFor = id => { const r = rates.find(x => x.charge_type_id === id && x.owner_id === ctx.owner_id) || rates.find(x => x.charge_type_id === id && x.owner_id === master);
+      return r ? Number(r.rate) : Number(chargeTypeById(id).default_rate || 0); };
     const body = openModal('Add Charge', `
       <form id="chg-form" autocomplete="off">
         <p class="muted small" style="margin-top:0">Account ${esc(ownerById(ctx.owner_id).code || '')}</p>
         <div class="field"><label for="chg-type">Charge</label>
-          <select id="chg-type">${types.map(t => `<option value="${t.id}">${esc(t.name)} (per ${esc(t.unit)})</option>`).join('')}</select></div>
+          <select id="chg-type">${types.map(t => `<option value="${t.id}" ${ctx.typeCode === t.code ? 'selected' : ''}>${esc(t.name)} (per ${esc(t.unit)})</option>`).join('')}</select></div>
         <div class="grid2">
           <div class="field"><label for="chg-qty">Qty</label><input id="chg-qty" type="number" inputmode="decimal" step="any" min="0.01" value="1" required></div>
           <div class="field"><label for="chg-rate">Rate ($)</label><input id="chg-rate" type="number" inputmode="decimal" step="any" min="0" required></div>
@@ -2884,9 +2933,9 @@
         <div class="list">${list.map(r => `
           <a class="list-item" href="#/billing/${r.owner_id}/${ym}">
             <div class="row spread"><span class="title">${esc(r.o.code || '?')} — ${esc(r.o.name || '')}</span><strong>${money(r.total)}</strong></div>
-            <div class="meta">${r.status === 'closed' ? badge('closed') : '<span class="badge open">open</span>'} &middot; ${r.line_count} line${r.line_count === 1 ? '' : 's'}</div>
+            <div class="meta">${r.status === 'closed' ? badge('closed') : '<span class="badge open">open</span>'} &middot; ${r.line_count} line${r.line_count === 1 ? '' : 's'}${subsOf(r.owner_id).length ? ` &middot; includes ${subsOf(r.owner_id).map(x => esc(x.code)).join(', ')}` : ''}</div>
           </a>`).join('') || '<p class="muted">No accounts yet. Add them in Setup &gt; Accounts.</p>'}</div>
-        <p class="muted small">Open months are live and change as loads come and go. Close a month after it's billed to freeze it.</p>
+        <p class="muted small">One statement per bill-to account; subcustomers are included in their master's statement. Open months are live and change as loads come and go. Close a month after it's billed to freeze it.</p>
         <div class="btn-row"><button class="btn secondary" id="charge-types" type="button">Charge Types</button></div>
       </div>`);
     $('#bill-month').onchange = e => { if (validYm(e.target.value)) { savePref('billMonth', e.target.value); viewBilling(e.target.value); } };
@@ -2897,20 +2946,26 @@
   async function viewStatement(ownerId, ymArg) {
     if (!can('manager')) { location.hash = '#/'; return; }
     const mySeq = navSeq;
+    if (ownerById(ownerId).bill_to_id) { location.hash = `#/billing/${ownerById(ownerId).bill_to_id}/${validYm(ymArg) || ''}`; return; }
     const owner = ownerById(ownerId);
     if (!owner.id) { render(`<div class="card"><h2>Account not found</h2><a class="btn" href="#/billing">Billing</a></div>`); return; }
+    const members = [owner, ...subsOf(owner.id)];
+    const memberIds = members.map(m => m.id);
     const ym = validYm(ymArg) || addYm(ymOf(new Date()), -1);
     savePref('billMonth', ym);
     if (!document.querySelector('#st-page')) render(`<div class="loading">Loading...</div>`);
     const [st, charges, rates] = await Promise.all([
       q(sb.rpc('wms_billing_statement', { p_owner_id: ownerId, p_month: ym + '-01' })),
-      q(sb.from('manual_charges').select('*').eq('owner_id', ownerId).gte('charge_date', ym + '-01').lt('charge_date', addYm(ym, 1) + '-01').order('charge_date')),
-      q(sb.from('account_rates').select('id').eq('owner_id', ownerId))
+      q(sb.from('manual_charges').select('*').in('owner_id', memberIds).gte('charge_date', ym + '-01').lt('charge_date', addYm(ym, 1) + '-01').order('charge_date')),
+      q(sb.from('account_rates').select('id').in('owner_id', memberIds))
     ]);
     if (mySeq !== navSeq) return;
     const isOpen = st.status === 'open';
     const lines = st.lines || [];
-    const cats = [...new Set(lines.map(l => l.category))];
+    // group by account: the master's own lines first, then each subcustomer
+    const acctGroups = [...new Set(lines.map(l => l.account_code || owner.code))]
+      .map(code => [code, (lines.find(l => (l.account_code || owner.code) === code) || {}).account_name || ownerById((S.owners || []).find(o => o.code === code)?.id).name,
+        lines.filter(l => (l.account_code || owner.code) === code)]);
     const showWh = new Set(lines.map(l => l.warehouse_code).filter(Boolean)).size > 1;
     const lineRow = l => `
       <div class="list-item st-line">
@@ -2925,18 +2980,20 @@
         <div class="row" style="gap:8px;margin:-4px 0 12px">
           <a class="btn sm ghost" href="#/billing/${ownerId}/${addYm(ym, -1)}">&lsaquo; ${esc(monthLabel(addYm(ym, -1), true))}</a>
           <a class="btn sm ghost" href="#/billing/${ownerId}/${addYm(ym, 1)}">${esc(monthLabel(addYm(ym, 1), true))} &rsaquo;</a>
-          <span class="muted small">Statement ${esc(st.statement_no)}</span>
+          <span class="muted small">Statement ${esc(st.statement_no)}${members.length > 1 ? ` &middot; bill-to for ${members.slice(1).map(m => esc(m.code)).join(', ')}` : ''}</span>
         </div>
         ${!isOpen ? `<div class="notice ok">Closed ${esc(fmtDateTime(st.closed_at))}${st.closed_by ? ' by ' + esc(st.closed_by) : ''}. These numbers are frozen.</div>`
           : st.month_ended ? `<div class="notice warn">${esc(monthLabel(ym))} is over. Review the charges, then <strong>Close Month</strong> to freeze this statement.</div>`
           : `<div class="notice">Month in progress. These numbers update as loads come and go.</div>`}
         ${!rates.length ? `<div class="notice warn">No rates are set for ${esc(owner.code)} yet, so only manual charges show. Tap <strong>Rates</strong> to enter the contract.</div>` : ''}
         <div class="card">
-          ${cats.length ? cats.map(c => {
-            const rows = lines.filter(l => l.category === c);
-            return `<h2 style="margin:4px 0 6px">${esc(c)}</h2>${rows.map(lineRow).join('')}
-              <div class="row spread small" style="margin:4px 0 12px"><span class="muted">${esc(c)} subtotal</span><strong>${money(rows.reduce((a, l) => a + Number(l.amount), 0))}</strong></div>`;
-          }).join('') : '<p class="muted">No charges for this month.</p>'}
+          ${lines.length ? acctGroups.map(([code, name, rowsA]) => `
+            ${acctGroups.length > 1 || code !== owner.code ? `<div class="st-acct"><span>${esc(code)}</span> ${esc(name || '')}<strong>${money(rowsA.reduce((a, l) => a + Number(l.amount), 0))}</strong></div>` : ''}
+            ${[...new Set(rowsA.map(l => l.category))].map(c => {
+              const rows = rowsA.filter(l => l.category === c);
+              return `<h2 style="margin:4px 0 6px">${esc(c)}</h2>${rows.map(lineRow).join('')}
+                <div class="row spread small" style="margin:4px 0 12px"><span class="muted">${esc(c)} subtotal</span><strong>${money(rows.reduce((a, l) => a + Number(l.amount), 0))}</strong></div>`;
+            }).join('')}`).join('') : '<p class="muted">No charges for this month.</p>'}
           <div class="row spread st-total"><strong>Total</strong><strong class="big-money">${money(st.total)}</strong></div>
         </div>
         ${charges.length ? `<div class="card"><h2 style="margin-top:0">Manual charges this month</h2><div id="st-charges">${charges.map(chargeRow).join('')}</div></div>` : ''}
@@ -2958,19 +3015,26 @@
     $('#st-print').onclick = () => WmsPrint.statement(st, owner, S.settings, monthLabel(ym));
     $('#st-csv').onclick = () => {
       const n = downloadCsv(`statement-${st.statement_no}.csv`,
-        ['Statement', 'Account', 'Month', 'Status', 'Category', 'Description', 'Warehouse', 'Ref', 'Qty', 'Unit', 'Rate', 'Amount'],
-        lines.map(l => [st.statement_no, owner.code, ym, st.status, l.category, l.description, l.warehouse_code, l.ref, l.qty, l.uom, l.rate, l.amount]));
+        ['Statement', 'Bill-to', 'Account', 'Month', 'Status', 'Category', 'Description', 'Warehouse', 'Ref', 'Qty', 'Unit', 'Rate', 'Amount'],
+        lines.map(l => [st.statement_no, owner.code, l.account_code || owner.code, ym, st.status, l.category, l.description, l.warehouse_code, l.ref, l.qty, l.uom, l.rate, l.amount]));
       toast(`Exported ${n} line${n === 1 ? '' : 's'}.`);
     };
     $('#st-detail').onclick = () => busy($('#st-detail'), async () => {
       const rows = await q(sb.rpc('wms_billing_detail', { p_owner_id: ownerId, p_month: ym + '-01' }));
       const n = downloadCsv(`billing-detail-${owner.code}-${ym}.csv`,
-        ['Event', 'Date', 'Warehouse', 'Ref', 'WMS Pallet ID', lbl.cust(), 'SKU', lbl.lot(), 'Qty', 'UOM'],
-        rows.map(r => [r.event, fmtDateTime(r.event_at), r.warehouse_code, r.ref, r.lp_id, r.customer_pallet_id, r.sku, r.lot_number, r.qty, r.uom]));
+        ['Account', 'Event', 'Date', 'Warehouse', 'Ref', 'WMS Pallet ID', lbl.cust(), 'SKU', lbl.lot(), 'Qty', 'UOM'],
+        rows.map(r => [r.account_code, r.event, fmtDateTime(r.event_at), r.warehouse_code, r.ref, r.lp_id, r.customer_pallet_id, r.sku, r.lot_number, r.qty, r.uom]));
       toast(`Exported ${n} pallet row${n === 1 ? '' : 's'}.`);
     });
-    $('#st-rates').onclick = () => busy(null, () => ratesModal(owner, reload));
-    $('#st-add')?.addEventListener('click', () => busy(null, () => chargeForm({ owner_id: ownerId, date: defaultChargeDate(ym) }, reload)));
+    // with subcustomers: pick whose rates / which account the charge is for
+    const pickMember = (title, go) => {
+      if (members.length === 1) return go(owner);
+      const body = openModal(title, `<div class="list">${members.map(m => `<a class="list-item" href="#" data-m="${m.id}"><span class="title">${esc(m.code)} — ${esc(m.name)}</span>
+        <div class="meta">${m.id === owner.id ? 'Master (bill-to). Its rates apply to subcustomers that don\'t have their own.' : 'Subcustomer'}</div></a>`).join('')}</div>`);
+      $$('[data-m]', body).forEach(a => a.onclick = e => { e.preventDefault(); closeModal(); busy(null, () => go(ownerById(a.dataset.m))); });
+    };
+    $('#st-rates').onclick = () => pickMember('Rates for which account?', m => ratesModal(m, reload));
+    $('#st-add')?.addEventListener('click', () => pickMember('Charge which account?', m => chargeForm({ owner_id: m.id, date: defaultChargeDate(ym) }, reload)));
     $('#st-close')?.addEventListener('click', async () => {
       if (!await askConfirm(`Close ${monthLabel(ym)}?`,
         `This freezes statement ${esc(st.statement_no)} at ${money(st.total)}. Charges for ${esc(monthLabel(ym))} can't be added or removed until an admin reopens it.`, 'Close Month')) return;
@@ -2995,18 +3059,26 @@
   async function ratesModal(owner, after) {
     const existing = await q(sb.from('account_rates').select('*').eq('owner_id', owner.id));
     const find = (basis, ct = null) => existing.find(r => r.basis === basis && (r.charge_type_id || null) === ct);
+    const master = owner.bill_to_id ? ownerById(owner.bill_to_id) : null;
+    const mRates = master ? await q(sb.from('account_rates').select('*').eq('owner_id', master.id)) : [];
+    const fromMaster = (basis, ct = null) => {
+      if (!master || ['monthly_sqft', 'monthly_flat'].includes(basis)) return null;
+      const r = mRates.find(x => x.basis === basis && (x.charge_type_id || null) === ct);
+      return r ? `${master.code}: ${rateText(r.rate)}` : null;
+    };
     const val = r => r ? String(Number(r.rate)) : '';
     const types = (S.chargeTypes || []).filter(t => t.active);
     const sq = find('monthly_sqft');
     const body = openModal(`Rates: ${owner.code}`, `
       <form id="rates-form" autocomplete="off">
         <p class="muted small" style="margin-top:0">Dollars per unit. Leave a box blank if the contract doesn't charge it. Changes apply to open months; closed months keep what was billed.</p>
+        ${master ? `<div class="notice">${esc(owner.code)} bills to <strong>${esc(master.code)}</strong>. A blank box uses ${esc(master.code)}'s rate (shown in gray). Fill a box only where this location's contract differs. Monthly space and flat fees are never copied from the master.</div>` : ''}
         ${RATE_GROUPS.map(g => `
           <h2 style="margin:14px 0 4px">${esc(g.title)}</h2>
           ${g.note ? `<p class="muted small" style="margin:0 0 6px">${esc(g.note)}</p>` : ''}
           <div class="grid2">${g.rows.map(([b, label]) => `
             <div class="field"><label for="r-${b}">${esc(label)}</label>
-              <input id="r-${b}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find(b)))}" placeholder="not billed"></div>
+              <input id="r-${b}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find(b)))}" placeholder="${esc(fromMaster(b) || 'not billed')}"></div>
             ${b === 'monthly_sqft' ? `<div class="field"><label for="r-sqft">Contract sq ft</label>
               <input id="r-sqft" type="number" inputmode="numeric" step="any" min="1" value="${esc(sq?.qty ? String(Number(sq.qty)) : '')}"></div>` : ''}`).join('')}
           </div>`).join('')}
@@ -3014,7 +3086,7 @@
         <p class="muted small" style="margin:0 0 6px">This account's price for each extra charge. Blank uses the standard rate shown.</p>
         <div class="grid2">${types.map(t => `
           <div class="field"><label for="r-ct-${t.id}">${esc(t.name)} (per ${esc(t.unit)})</label>
-            <input id="r-ct-${t.id}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find('manual', t.id)))}" placeholder="${esc(rateText(t.default_rate))}"></div>`).join('')}
+            <input id="r-ct-${t.id}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find('manual', t.id)))}" placeholder="${esc(fromMaster('manual', t.id) || rateText(t.default_rate))}"></div>`).join('')}
         </div>
         <button class="btn block" id="rates-save" style="margin-top:10px">Save Rates</button>
       </form>`);
@@ -3581,9 +3653,10 @@
       cols: () => [
         ['code', 'Code', ['code', 'accountcode', 'account', 'customercode'], true], ['name', 'Name', ['name', 'accountname', 'customername', 'company'], true],
         ['contact_name', 'Contact', ['contact', 'contactname']], ['email', 'Email', ['email']], ['phone', 'Phone', ['phone']],
-        ['billing_address', 'Billing address', ['billingaddress', 'billto', 'address']], ['notes', 'Notes', ['notes']]
+        ['billing_address', 'Billing address', ['billingaddress', 'address']], ['notes', 'Notes', ['notes']],
+        ['bill_to', 'Bills to (master code)', ['billsto', 'billto', 'master', 'mastercode', 'parent', 'billtocode']]
       ],
-      example: () => ['ACME', 'Acme Foods', 'Jan Smith', 'ap@acme.com', '555-123-4567', 'PO Box 1, Tulsa OK 74101', '']
+      example: () => ['PLANT1', 'Acme Foods - Plant 1', 'Jan Smith', 'ap@acme.com', '555-123-4567', 'PO Box 1, Tulsa OK 74101', '', 'ACME']
     },
     locations: {
       label: 'Locations', note: () => `Adds locations to ${whById(S.whId).code || 'this warehouse'}. Switch warehouses in the header to load another building.`,
@@ -3711,6 +3784,11 @@
         if (!code) err('Code is blank'); if (!g('name')) err('Name is blank');
         if (seen.has(code)) err('Same code twice in this file'); seen.add(code);
         r.existing = (S.owners || []).find(o => o.code.toUpperCase() === code);
+        const bt = g('bill_to').toUpperCase();
+        if (bt && bt === code) err('An account cannot bill to itself');
+        if (idx.bill_to !== undefined) r.billToCode = bt && bt !== code ? bt : null;   // only touch links when the sheet has the column
+        if (r.billToCode && !(S.owners || []).some(o => o.code.toUpperCase() === r.billToCode && isMaster(o))
+            && !rows.some(x => x !== r && get(x.raw, 'code').toUpperCase() === r.billToCode && !get(x.raw, 'bill_to'))) err(`Master ${r.billToCode} not found (it must bill itself)`);
         r.data = { code, name: g('name'), contact_name: strOrNull(g('contact_name')), email: strOrNull(g('email')), phone: strOrNull(g('phone')),
           billing_address: strOrNull(g('billing_address')), notes: strOrNull(g('notes')) };
         r.label = code;
@@ -3844,6 +3922,17 @@
       }
       rows.receipts = receipts;
     }
+    if (kind === 'accounts' && rows.some(r => r.billToCode !== undefined)) {
+      await loadRef();
+      for (const r of rows) {
+        if (r.billToCode === undefined) continue;
+        const me = S.owners.find(o => o.code.toUpperCase() === r.data.code);
+        const target = r.billToCode ? S.owners.find(o => o.code.toUpperCase() === r.billToCode) : null;
+        if (!me || (me.bill_to_id || null) === (target?.id || null)) continue;
+        try { await q(sb.from('owners').update({ bill_to_id: target?.id || null }).eq('id', me.id)); }
+        catch (e) { fails.push([r.line, r.label, friendly(e)]); }
+      }
+    }
     await loadRef();
     const recLinks = (rows.receipts || []).map(rc => `<a href="#/receipt/${rc.id}">${esc(rc.receipt_no)}</a>`).join(', ');
     say(`<strong>Done: ${done} ${kind === 'opening' ? 'pallets loaded' : 'saved'}.</strong>${recLinks ? ' Receipt ' + recLinks + '.' : ''}${fails.length ? ` ${fails.length} failed (below).` : ''}
@@ -3858,11 +3947,12 @@
     out.innerHTML = `
       <div class="row spread" style="margin-bottom:10px"><span class="muted">${rows.filter(r => r.active).length} active accounts</span>
         <button class="btn" id="add-acct">Add Account</button></div>
-      <p class="muted small">An account is a customer whose product you store. Every item belongs to one account, and each receipt and shipment is for one account.</p>
-      ${rows.map(o => `
-        <a class="list-item" href="#" data-acct="${o.id}" style="${o.active ? '' : 'opacity:.55'}">
-          <div class="row spread"><span class="title">${esc(o.code)} — ${esc(o.name)}</span>${o.active ? '' : badge('inactive')}</div>
-          <div class="meta">${S.items.filter(i => i.owner_id === o.id).length} items${o.contact_name ? ' &middot; ' + esc(o.contact_name) : ''}${o.email ? ' &middot; ' + esc(o.email) : ''}</div>
+      <p class="muted small">An account is a customer whose product you store; it has its own items and inventory. A <strong>subcustomer</strong> (a plant or location) bills to a <strong>master</strong> account, which gets one statement for all of its subcustomers.</p>
+      ${rows.filter(isMaster).map(m => [m, ...subsOf(m.id)]).flat().map(o => `
+        <a class="list-item ${o.bill_to_id ? 'sub-acct' : ''}" href="#" data-acct="${o.id}" style="${o.active ? '' : 'opacity:.55'}">
+          <div class="row spread"><span class="title">${o.bill_to_id ? '<span class="muted">&#8627;</span> ' : ''}${esc(o.code)} — ${esc(o.name)}</span>
+            <span>${!o.bill_to_id && subsOf(o.id).length ? `<span class="badge closed">Bill-to &middot; ${subsOf(o.id).length} sub</span> ` : ''}${o.active ? '' : badge('inactive')}</span></div>
+          <div class="meta">${S.items.filter(i => i.owner_id === o.id).length} items${o.bill_to_id ? ' &middot; bills to ' + esc(ownerById(o.bill_to_id).code) : ''}${o.contact_name ? ' &middot; ' + esc(o.contact_name) : ''}${o.email ? ' &middot; ' + esc(o.email) : ''}</div>
         </a>`).join('')}`;
     $('#add-acct', out).onclick = () => accountForm(null);
     $$('[data-acct]', out).forEach(a => a.onclick = e => { e.preventDefault(); accountForm(rows.find(r => r.id === a.dataset.acct)); });
@@ -3881,6 +3971,12 @@
           <div class="field"><label for="a-phone">Phone</label><input id="a-phone" type="tel" value="${esc(r.phone || '')}" maxlength="30"></div>
         </div>
         <div class="field"><label for="a-bill">Billing address</label><textarea id="a-bill" maxlength="400">${esc(r.billing_address || '')}</textarea></div>
+        <div class="field"><label for="a-billto">Bills to</label>
+          <select id="a-billto" ${o && subsOf(o.id).length ? 'disabled' : ''}>
+            <option value="">Itself (a master / bill-to account)</option>
+            ${(S.owners || []).filter(x => isMaster(x) && x.id !== r.id && x.active).map(x => `<option value="${x.id}" ${r.bill_to_id === x.id ? 'selected' : ''}>${esc(x.code)} — ${esc(x.name)}</option>`).join('')}
+          </select>
+          <div class="hint">${o && subsOf(o.id).length ? `This is the bill-to for ${subsOf(o.id).map(x => esc(x.code)).join(', ')}.` : 'Pick a master if this is a plant or location of a bigger customer. It keeps its own items and inventory; charges go on the master\'s statement.'}</div></div>
         <div class="field"><label for="a-notes">Notes</label><input id="a-notes" value="${esc(r.notes || '')}" maxlength="300"></div>
         <div class="field"><label class="check"><input type="checkbox" id="a-active" ${r.active ? 'checked' : ''}> Active</label></div>
         <button class="btn block" id="acct-save">${o ? 'Save' : 'Add Account'}</button>
@@ -3892,7 +3988,8 @@
           code: $('#a-code', body).value.trim().toUpperCase(), name: $('#a-name', body).value.trim(),
           contact_name: strOrNull($('#a-contact', body).value), email: strOrNull($('#a-email', body).value),
           phone: strOrNull($('#a-phone', body).value), billing_address: strOrNull($('#a-bill', body).value),
-          notes: strOrNull($('#a-notes', body).value), active: $('#a-active', body).checked
+          notes: strOrNull($('#a-notes', body).value), active: $('#a-active', body).checked,
+          ...(!$('#a-billto', body).disabled ? { bill_to_id: $('#a-billto', body).value || null } : {})
         };
         if (o) await q(sb.from('owners').update(row).eq('id', o.id));
         else await q(sb.from('owners').insert(row));
