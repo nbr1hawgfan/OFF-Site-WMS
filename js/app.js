@@ -545,7 +545,7 @@
     const since = new Date(); since.setHours(0, 0, 0, 0); since.setDate(since.getDate() - 29);
     const [inv, rcv, shipped, openR, openS, bill] = await Promise.all([
       fetchAll(() => wh(sb.from('v_inventory').select('pallet_id, lp_id, item_id, sku, description, uom, qty_on_hand, status, received_at, warehouse_id, owner_id')).order('pallet_id')),
-      fetchAll(() => sb.from('v_transactions').select('id, created_at, txn_type, lp_id, to_warehouse, owner_code')
+      fetchAll(() => sb.from('v_transactions').select('id, created_at, txn_type, lp_id, to_warehouse, owner_code, opening')
         .in('txn_type', ['RECEIVE', 'VOID_RECEIVE']).gte('created_at', since.toISOString()).order('id')),
       fetchAll(() => wh(sb.from('shipments').select('id, shipped_at, owner_id, warehouse_id, shipment_lines(count)'))
         .eq('status', 'shipped').gte('shipped_at', since.toISOString()).order('shipped_at')),
@@ -557,7 +557,7 @@
     const voided = new Set(rcv.filter(t => t.txn_type === 'VOID_RECEIVE').map(t => t.lp_id));
     const whCode = whById(S.whId).code;
     const ownerByCode = Object.fromEntries((S.owners || []).map(o => [o.code, o.id]));
-    const received = rcv.filter(t => t.txn_type === 'RECEIVE' && !voided.has(t.lp_id) && (allWh || t.to_warehouse === whCode))
+    const received = rcv.filter(t => t.txn_type === 'RECEIVE' && !t.opening && !voided.has(t.lp_id) && (allWh || t.to_warehouse === whCode))
       .map(t => ({ at: t.created_at, owner_id: ownerByCode[t.owner_code] }));
     return { inv, received, shipped, openR, openS, bill, since };
   }
@@ -1432,6 +1432,7 @@
     let current = { rows: [], cols: [], pallets: [] };
 
     const draw = () => {
+      if (!document.getElementById('inv-out')) return;   // left the page before a delayed redraw
       const pallets = matchRows();
       const isLots = f.view === 'lots';
       const cols = isLots ? lotCols() : palletCols();
@@ -1738,6 +1739,7 @@
         <span class="ev-dir ${e.kind}">${e.kind === 'in' ? 'IN' : 'OUT'}</span>
         <span class="ev-time">${esc(time)}</span>
         <span class="ev-name">${esc(e.name)}</span>
+        <span class="ev-sub">${esc([e.no, e.door && 'Door ' + e.door].filter(Boolean).join(' · '))}</span>
       </a>`;
     return `
       <a class="ev ev-${e.cls}" href="${e.href}">
@@ -1771,8 +1773,28 @@
       ? `${dayLabel(from, { month: 'short', day: 'numeric' })} – ${dayLabel(addDays(to, -1), { month: 'short', day: 'numeric', year: 'numeric' })}`
       : dayLabel(from, { weekday: 'long', month: 'long', day: 'numeric' });
 
+    const split = loadPref('scheduleLayout', 'split') === 'split';
+    const lanes = [['in', 'Inbound'], ['out', 'Outbound']].filter(([k]) => scheduleFilter === 'all' || scheduleFilter === k);
+    const weekGrid = evsAll => `<div class="week">${[...Array(7)].map((_, i) => {
+        const d = addDays(from, i), ds = ymd(d);
+        const evs = evsAll.filter(e => e.day === ds);
+        return `<div class="week-day ${ds === todayStr ? 'today' : ''}">
+          <a class="week-head" href="#/schedule/day/${ds}">
+            <span>${esc(dayLabel(d, { weekday: 'short' }))} <strong>${d.getDate()}</strong></span>
+            <span class="muted small">${evs.length || ''}</span></a>
+          ${evs.map(e => eventCard(e, true)).join('') || '<div class="muted small week-empty">—</div>'}
+        </div>`;
+      }).join('')}</div>`;
     let body;
-    if (mode === 'day') {
+    if (split) {
+      // separate lanes: inbound and outbound never mix
+      body = mode === 'day'
+        ? `<div class="day-split">${lanes.map(([k, label]) => { const evs = events.filter(e => e.kind === k);
+            return `<section class="lane lane-${k}"><h2 class="lane-head">${label} <span class="muted">${evs.length}</span></h2>
+              ${evs.map(e => eventCard(e, false)).join('') || `<div class="card"><p class="muted" style="margin:0">No ${label.toLowerCase()} loads.</p></div>`}</section>`; }).join('')}</div>`
+        : lanes.map(([k, label]) => { const evs = events.filter(e => e.kind === k);
+            return `<section class="lane lane-${k}"><h2 class="lane-head">${label} <span class="muted">${evs.length} this week</span></h2>${weekGrid(evs)}</section>`; }).join('');
+    } else if (mode === 'day') {
       body = events.length ? events.map(e => eventCard(e, false)).join('')
         : `<div class="card"><p class="muted" style="margin:0">Nothing scheduled${scheduleFilter !== 'all' ? ' for this filter' : ''}.</p></div>`;
     } else {
@@ -1808,6 +1830,10 @@
             ${[['all', `All ${all.length}`], ['in', `In ${nIn}`], ['out', `Out ${nOut}`]].map(([k, l]) =>
               `<a href="#" data-filter="${k}" class="${scheduleFilter === k ? 'on' : ''}">${l}</a>`).join('')}
           </div>
+          <div class="seg small-seg">
+            <a href="#" data-layout="split" class="${split ? 'on' : ''}">In / Out lanes</a>
+            <a href="#" data-layout="together" class="${split ? '' : 'on'}">Together</a>
+          </div>
         </div>
         ${nLate ? `<div class="notice bad">${nLate} late: ${esc(all.filter(e => e.cls === 'late').map(e => e.name).join(', '))}</div>` : ''}
         ${body}
@@ -1819,6 +1845,11 @@
       </div>`);
 
     $('#sched-date').addEventListener('change', e => { if (e.target.value) location.hash = `#/schedule/${mode}/${e.target.value}`; });
+    $$('[data-layout]').forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      savePref('scheduleLayout', a.dataset.layout);
+      viewSchedule(mode, ymd(from));
+    });
     $$('[data-filter]').forEach(a => a.onclick = ev => {
       ev.preventDefault();
       scheduleFilter = a.dataset.filter; savePref('scheduleFilter', scheduleFilter);
@@ -3140,7 +3171,7 @@
       received: async () => {
         const g = range();
         const rcpts = await fetchAll(() => sb.from('receipts').select('id, receipt_no, received_at, vendor_name, carrier, trailer_no, po_number, inbound_bol, status, warehouse_id, owner_id')
-          .neq('status', 'void').gte('received_at', g.from).lt('received_at', g.to).order('id'));
+          .neq('status', 'void').eq('is_opening', false).gte('received_at', g.from).lt('received_at', g.to).order('id'));
         const byId = Object.fromEntries(rcpts.map(r => [r.id, r]));
         const pallets = await fetchIn(rcpts.map(r => r.id), chunk => () => sb.from('pallets')
           .select('lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, qty_received, status, receipt_id')
@@ -3253,7 +3284,7 @@
     await loadRef();
     if (mySeq !== navSeq) return;
     const tabs = [['items', 'Items'], ['locations', 'Locations'], ['accounts', 'Accounts'], ['parties', 'Ship-To'],
-      ['warehouses', 'Warehouses'], ['users', 'Users']].concat(can('admin') ? [['company', 'Company']] : []);
+      ['warehouses', 'Warehouses'], ['users', 'Users'], ['import', 'Import']].concat(can('admin') ? [['company', 'Company']] : []);
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <h1>Setup</h1>
@@ -3265,6 +3296,7 @@
     if (tab === 'accounts') return setupAccounts(out);
     if (tab === 'warehouses') return setupWarehouses(out);
     if (tab === 'users') return setupUsers(out);
+    if (tab === 'import') return setupImport(out);
     if (tab === 'company' && can('admin')) return setupCompany(out);
     return setupItems(out);
   }
@@ -3446,6 +3478,361 @@
         viewSetup('parties');
       });
     };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* setup: spreadsheet import (CSV, Excel, or paste from Sheets)        */
+  /* ------------------------------------------------------------------ */
+  // CSV / TSV parser that handles quotes, commas and line breaks inside quotes
+  function parseDelimited(text) {
+    text = String(text || '').replace(/^﻿/, '');
+    const first = text.split(/\r?\n/, 1)[0] || '';
+    const delim = first.includes('\t') ? '\t' : (first.split(';').length > first.split(',').length ? ';' : ',');
+    const rows = []; let row = [], f = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
+        else f += c;
+      } else if (c === '"' && f === '') q = true;
+      else if (c === delim) { row.push(f); f = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(f); f = ''; rows.push(row); row = [];
+      } else f += c;
+    }
+    if (f !== '' || row.length) { row.push(f); rows.push(row); }
+    return rows.filter(r => r.some(v => String(v).trim() !== ''));
+  }
+  const normKey = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  function parseDateCell(v) {
+    v = String(v || '').trim();
+    if (!v) return null;
+    let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return `${m[1]}-${pad2(m[2])}-${pad2(m[3])}`;
+    m = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+    if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${pad2(m[1])}-${pad2(m[2])}`; }
+    if (/^\d{5}$/.test(v)) { const d = new Date(Date.UTC(1899, 11, 30) + Number(v) * 86400000); return d.toISOString().slice(0, 10); } // Excel serial
+    return 'bad';
+  }
+  const yes = v => /^(y|yes|true|1|x)$/i.test(String(v || '').trim());
+  const numCell = v => { const s = String(v ?? '').replace(/[,$\s]/g, ''); return s === '' ? null : Number(s); };
+  let xlsxLoading = null;
+  function loadXlsxLib() {
+    if (window.XLSX) return Promise.resolve();
+    xlsxLoading = xlsxLoading || new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      s.onload = res; s.onerror = () => { xlsxLoading = null; rej(new Error('Could not load the Excel reader. Save the sheet as CSV and try again.')); };
+      document.head.appendChild(s);
+    });
+    return xlsxLoading;
+  }
+
+  const IMPORTS = {
+    items: {
+      label: 'Items', note: 'Adds new items. Existing SKUs (same account) are updated when "Update existing" is checked.',
+      cols: () => [
+        ...(multiOwner() ? [['account', 'Account', ['account', 'accountcode', 'customer', 'owner', 'subcustomer'], true]] : []),
+        ['sku', 'SKU', ['sku', 'item', 'itemnumber', 'itemno', 'itemcode', 'partnumber', 'part', 'partno'], true],
+        ['description', 'Description', ['description', 'desc', 'itemdescription', 'name'], true],
+        ['uom', 'UOM', ['uom', 'unit', 'unitofmeasure', 'units']],
+        ['units_per_pallet', 'Units per pallet', ['unitsperpallet', 'qtyperpallet', 'perpallet', 'palletqty', 'casesperpallet']],
+        ['unit_weight_lbs', 'Unit weight (lbs)', ['unitweightlbs', 'unitweight', 'weight', 'weightlbs', 'lbs']],
+        ['nmfc', 'NMFC', ['nmfc']],
+        ['freight_class', 'Freight class', ['freightclass', 'class']],
+        ['lot_required', `${lbl.lotShort()} required (Y/N)`, ['lotrequired', 'requirelot', normKey(lbl.lotShort()) + 'required']]
+      ],
+      example: () => [...(multiOwner() ? [activeOwners()[0]?.code || 'MAIN'] : []), 'WID-100', 'Widget Assembly 100', 'CS', '40', '12.5', '', '70', 'Y']
+    },
+    parties: {
+      label: 'Ship-To & Vendors', note: 'Adds to the saved address book. A matching name updates the existing entry when "Update existing" is checked.',
+      cols: () => [
+        ['name', 'Name', ['name', 'company', 'customer', 'customername', 'vendor', 'shipto'], true],
+        ['party_type', 'Type (Ship-to / Vendor / Both)', ['type', 'partytype', 'kind']],
+        ['address_line1', 'Address', ['address', 'address1', 'addressline1', 'street']],
+        ['address_line2', 'Address line 2', ['address2', 'addressline2', 'suite']],
+        ['city', 'City', ['city']], ['state', 'State', ['state', 'st']], ['zip', 'ZIP', ['zip', 'zipcode', 'postalcode', 'postal']],
+        ['contact_name', 'Contact', ['contact', 'contactname', 'attn']], ['phone', 'Phone', ['phone', 'phonenumber', 'tel']],
+        ['email', 'Email', ['email', 'emailaddress']], ['notes', 'Notes', ['notes', 'instructions', 'specialinstructions']]
+      ],
+      example: () => ['Acme Distribution', 'Ship-to', '123 Main St', '', 'Dallas', 'TX', '75201', 'Jan Smith', '555-123-4567', 'jan@acme.com', 'Dock hours 7a-3p']
+    },
+    accounts: {
+      label: 'Accounts', note: 'Customer accounts (whose product it is). A matching code updates the account when "Update existing" is checked.',
+      cols: () => [
+        ['code', 'Code', ['code', 'accountcode', 'account', 'customercode'], true], ['name', 'Name', ['name', 'accountname', 'customername', 'company'], true],
+        ['contact_name', 'Contact', ['contact', 'contactname']], ['email', 'Email', ['email']], ['phone', 'Phone', ['phone']],
+        ['billing_address', 'Billing address', ['billingaddress', 'billto', 'address']], ['notes', 'Notes', ['notes']]
+      ],
+      example: () => ['ACME', 'Acme Foods', 'Jan Smith', 'ap@acme.com', '555-123-4567', 'PO Box 1, Tulsa OK 74101', '']
+    },
+    locations: {
+      label: 'Locations', note: () => `Adds locations to ${whById(S.whId).code || 'this warehouse'}. Switch warehouses in the header to load another building.`,
+      cols: () => [
+        ['code', 'Code', ['code', 'location', 'locationcode', 'bin', 'slot'], true], ['zone', 'Zone', ['zone', 'aisle', 'area']],
+        ['loc_type', 'Type (storage / floor / staging / dock / hold)', ['type', 'loctype', 'locationtype']], ['sort_order', 'Sort order', ['sort', 'sortorder', 'seq', 'order']]
+      ],
+      example: () => ['A01-1', 'A', 'storage', '10']
+    },
+    opening: {
+      label: 'Opening inventory', note: () => `Loads pallets already in ${whById(S.whId).code || 'the building'} on day one, without receiving each one. They keep their received date and are not billed as inbound. Import items first.`,
+      cols: () => [
+        ...(multiOwner() ? [['account', 'Account', ['account', 'accountcode', 'customer', 'owner', 'subcustomer'], true]] : []),
+        ['sku', 'SKU', ['sku', 'item', 'itemnumber', 'itemno', 'itemcode', 'partnumber', 'part'], true],
+        ['lot', lbl.lot(), ['lot', 'lotnumber', 'lotno', 'production', 'productionnumber', normKey(lbl.lotShort()), normKey(lbl.lot())]],
+        ['qty', 'Qty per pallet', ['qty', 'quantity', 'qtyperpallet', 'units', 'cases', 'qtyonhand', 'onhand'], true],
+        ['pallets', 'Pallets (default 1)', ['pallets', 'palletcount', 'numpallets', 'count']],
+        ['location', 'Location', ['location', 'loc', 'bin', 'bay', 'slot'], true],
+        ['cust_id', lbl.cust(), ['custpalletid', 'customerpalletid', 'palletid', normKey(lbl.cust())]],
+        ...(lbl.ref1() ? [['ref1', lbl.ref1(), ['ref1', normKey(lbl.ref1())]]] : []),
+        ...(lbl.ref2() ? [['ref2', lbl.ref2(), ['ref2', normKey(lbl.ref2())]]] : []),
+        ['received', 'Received date', ['received', 'receiveddate', 'datereceived', 'receivedon', 'date']],
+        ['prod', 'Production date', ['productiondate', 'proddate', 'mfgdate']],
+        ['exp', 'Expiration date', ['expirationdate', 'expdate', 'expires', 'bestby']]
+      ],
+      example: () => [...(multiOwner() ? [activeOwners()[0]?.code || 'MAIN'] : []), 'WID-100', '714', '40', '1', 'A01-1', 'OS-PAL-1001',
+        ...(lbl.ref1() ? ['PG-5001'] : []), ...(lbl.ref2() ? [''] : []), '2026-08-15', '', '']
+    }
+  };
+
+  function setupImport(out) {
+    const kind = IMPORTS[loadPref('importKind', 'items')] ? loadPref('importKind', 'items') : 'items';
+    const spec = IMPORTS[kind];
+    const note = typeof spec.note === 'function' ? spec.note() : spec.note;
+    out.innerHTML = `
+      <div class="card accent">
+        <div class="field"><label for="imp-kind">What are you importing?</label>
+          <select id="imp-kind">${Object.entries(IMPORTS).map(([k, v]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
+        <p class="muted small" style="margin-top:0">${esc(note)}</p>
+        <p class="small" style="margin:0 0 10px">Columns: ${spec.cols().map(c => `<strong>${esc(c[1])}</strong>${c[3] ? '*' : ''}`).join(', ')}. <span class="muted">* required. Headers can be in any order; common names like "Item #" or "Part Number" are recognized.</span></p>
+        <div class="btn-row" style="margin-top:0"><button class="btn secondary" id="imp-template" type="button">Download template</button></div>
+        <div class="field" style="margin-top:12px"><label for="imp-file">Choose a file (.csv, .xlsx, .xls)</label>
+          <input id="imp-file" type="file" accept=".csv,.txt,.tsv,.xlsx,.xls,text/csv"></div>
+        <div class="field"><label for="imp-paste">…or paste rows copied from Excel or Google Sheets (include the header row)</label>
+          <textarea id="imp-paste" rows="5" placeholder="Copy the cells, header row included, and paste here"></textarea></div>
+        ${kind !== 'opening' ? `<label class="check"><input type="checkbox" id="imp-update" checked> Update existing</label>` : `<label class="check"><input type="checkbox" id="imp-mkloc"> Create missing locations</label>`}
+        <div class="btn-row"><button class="btn" id="imp-preview" type="button">Check rows</button></div>
+      </div>
+      <div id="imp-out"></div>`;
+    $('#imp-kind', out).onchange = e => { savePref('importKind', e.target.value); setupImport(out); };
+    $('#imp-template', out).onclick = () => downloadCsv(`template-${kind}.csv`, spec.cols().map(c => c[1]), [spec.example()]);
+    $('#imp-preview', out).onclick = () => busy($('#imp-preview', out), async () => {
+      let text = $('#imp-paste', out).value;
+      const file = $('#imp-file', out).files[0];
+      let source = 'pasted rows';
+      if (file) {
+        source = file.name;
+        if (/\.xlsx?$/i.test(file.name)) {
+          await loadXlsxLib();
+          const wb = window.XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+          text = window.XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]], { blankrows: false, rawNumbers: false });
+        } else text = await file.text();
+      }
+      const grid = parseDelimited(text);
+      if (grid.length < 2) throw new Error('No rows found. Include the header row and at least one data row.');
+      await importPreview(out, kind, grid, source);
+    });
+  }
+
+  async function importPreview(out, kind, grid, source) {
+    const spec = IMPORTS[kind], cols = spec.cols();
+    const head = grid[0].map(normKey);
+    const idx = {};
+    for (const [k, label, aliases] of cols) {
+      const cands = [normKey(label), k.replace(/_/g, ''), ...aliases];
+      const i = head.findIndex(h => cands.includes(h));
+      if (i >= 0 && !Object.values(idx).includes(i)) idx[k] = i;
+    }
+    const missing = cols.filter(c => c[3] && idx[c[0]] === undefined).map(c => c[1]);
+    if (missing.length) throw new Error(`Missing required column${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}. Download the template to see the headers.`);
+    const unused = grid[0].filter((h, i) => !Object.values(idx).includes(i) && String(h).trim());
+    const update = $('#imp-update', out)?.checked;
+    const mkLoc = $('#imp-mkloc', out)?.checked;
+    const get = (r, k) => idx[k] === undefined ? '' : String(r[idx[k]] ?? '').trim();
+    const ownerFor = code => {
+      if (!multiOwner()) return activeOwners()[0];
+      return activeOwners().find(o => o.code.toUpperCase() === String(code).toUpperCase());
+    };
+    const rows = grid.slice(1).map((r, n) => ({ line: n + 2, raw: r }));
+    const seen = new Set();
+    const ownerCode = r => multiOwner() ? (ownerFor(get(r.raw, 'account'))?.code || get(r.raw, 'account')) : '';
+
+    for (const r of rows) {
+      const g = k => get(r.raw, k);
+      const err = m => { r.error = r.error || m; };
+      if (kind === 'items') {
+        const o = ownerFor(g('account'));
+        if (!o) err(`Account "${g('account')}" not found`);
+        const sku = g('sku').toUpperCase();
+        if (!sku) err('SKU is blank');
+        if (!g('description')) err('Description is blank');
+        const nums = { units_per_pallet: numCell(g('units_per_pallet')), unit_weight_lbs: numCell(g('unit_weight_lbs')) };
+        for (const [k, v] of Object.entries(nums)) if (v !== null && !(v >= 0)) err(`${k.replace(/_/g, ' ')} is not a number`);
+        const key = (o?.id || '') + '|' + sku;
+        if (seen.has(key)) err('Same SKU twice in this file'); seen.add(key);
+        const ex = o && S.items.find(i => i.owner_id === o.id && i.sku.toUpperCase() === sku);
+        r.data = { owner_id: o?.id, sku, description: g('description'), uom: (g('uom') || S.settings?.default_uom || 'EA').toUpperCase(),
+          units_per_pallet: nums.units_per_pallet, unit_weight_lbs: nums.unit_weight_lbs, nmfc: strOrNull(g('nmfc')),
+          freight_class: strOrNull(g('freight_class')), lot_required: idx.lot_required === undefined ? true : yes(g('lot_required')) };
+        r.existing = ex; r.label = `${o?.code || '?'} ${sku}`;
+      } else if (kind === 'parties') {
+        const name = g('name');
+        if (!name) err('Name is blank');
+        const t = g('party_type').toLowerCase();
+        const party_type = /both/.test(t) ? 'both' : /vendor|supplier|shipper|from/.test(t) ? 'vendor' : 'consignee';
+        const key = name.toLowerCase();
+        if (seen.has(key)) err('Same name twice in this file'); seen.add(key);
+        r.existing = S.parties.find(p => p.name.toLowerCase() === key);
+        r.data = { name, party_type, address_line1: strOrNull(g('address_line1')), address_line2: strOrNull(g('address_line2')), city: strOrNull(g('city')),
+          state: strOrNull(g('state').toUpperCase()), zip: strOrNull(g('zip')), contact_name: strOrNull(g('contact_name')), phone: strOrNull(g('phone')),
+          email: strOrNull(g('email')), notes: strOrNull(g('notes')) };
+        r.label = name;
+      } else if (kind === 'accounts') {
+        const code = g('code').toUpperCase();
+        if (!code) err('Code is blank'); if (!g('name')) err('Name is blank');
+        if (seen.has(code)) err('Same code twice in this file'); seen.add(code);
+        r.existing = (S.owners || []).find(o => o.code.toUpperCase() === code);
+        r.data = { code, name: g('name'), contact_name: strOrNull(g('contact_name')), email: strOrNull(g('email')), phone: strOrNull(g('phone')),
+          billing_address: strOrNull(g('billing_address')), notes: strOrNull(g('notes')) };
+        r.label = code;
+      } else if (kind === 'locations') {
+        const code = g('code').toUpperCase();
+        if (!code) err('Code is blank');
+        if (seen.has(code)) err('Same code twice in this file'); seen.add(code);
+        const t = g('loc_type').toLowerCase();
+        const sort = numCell(g('sort_order'));
+        r.existing = whLocations().find(l => l.code.toUpperCase() === code) || S.locations.find(l => l.warehouse_id === S.whId && l.code.toUpperCase() === code);
+        r.data = { code, zone: strOrNull(g('zone')), loc_type: ['storage', 'floor', 'staging', 'dock', 'hold'].includes(t) ? t : 'storage',
+          sort_order: Number.isFinite(sort) ? sort : 0, warehouse_id: S.whId };
+        r.label = code;
+      } else if (kind === 'opening') {
+        const o = ownerFor(g('account'));
+        if (!o) err(`Account "${g('account')}" not found`);
+        const sku = g('sku').toUpperCase();
+        const it = o && S.items.find(i => i.owner_id === o.id && i.sku.toUpperCase() === sku && i.active);
+        if (o && !it) err(`SKU ${sku} is not set up${multiOwner() ? ' for ' + o.code : ''}. Import items first`);
+        const qty = numCell(g('qty'));
+        if (!(qty > 0)) err('Qty must be more than 0');
+        const pallets = idx.pallets === undefined || g('pallets') === '' ? 1 : numCell(g('pallets'));
+        if (!(Number.isInteger(pallets) && pallets >= 1 && pallets <= 500)) err('Pallets must be a whole number 1-500');
+        const locCode = g('location').toUpperCase();
+        const loc = whLocations().find(l => l.code.toUpperCase() === locCode);
+        if (!locCode) err('Location is blank');
+        else if (!loc && !mkLoc) err(`Location ${locCode} not in ${whById(S.whId).code || 'this warehouse'} (check "Create missing locations")`);
+        const lot = g('lot');
+        if (it?.lot_required && !lot) err(`${lbl.lotShort()} is required for ${sku}`);
+        const ids = { cust_id: g('cust_id').toUpperCase(), ref1: g('ref1').toUpperCase(), ref2: g('ref2').toUpperCase() };
+        if (pallets > 1 && (ids.cust_id || ids.ref1 || ids.ref2)) err('A row with pallet IDs must be 1 pallet');
+        const st = S.settings || {};
+        if (st.cust_pallet_required && !ids.cust_id) err(`${lbl.cust()} is required`);
+        if (st.ref1_label && st.ref1_required && !ids.ref1) err(`${st.ref1_label} is required`);
+        if (st.ref2_label && st.ref2_required && !ids.ref2) err(`${st.ref2_label} is required`);
+        for (const [k, v] of Object.entries(ids)) if (v) { const key = k + '|' + v; if (seen.has(key)) err(`${v} appears twice in this file`); seen.add(key); }
+        const dates = { received: parseDateCell(g('received')), prod: parseDateCell(g('prod')), exp: parseDateCell(g('exp')) };
+        for (const [k, v] of Object.entries(dates)) if (v === 'bad') err(`Can't read the ${k === 'received' ? 'received' : k === 'prod' ? 'production' : 'expiration'} date "${g(k)}"`);
+        if (dates.received && dates.received !== 'bad' && dates.received > todayIso()) err('Received date is in the future');
+        r.data = { owner: o, item: it, qty, pallets, locCode, loc, lot: strOrNull(lot), ...ids, ...dates };
+        r.label = `${sku} ${lot}`.trim();
+      }
+      r.action = r.error ? 'error' : r.existing ? (update ? 'update' : 'skip') : 'new';
+    }
+    const counts = { new: 0, update: 0, skip: 0, error: 0 };
+    rows.forEach(r => counts[r.action]++);
+    const palletTotal = kind === 'opening' ? rows.filter(r => r.action === 'new').reduce((a, r) => a + r.data.pallets, 0) : 0;
+    const newLocs = kind === 'opening' ? [...new Set(rows.filter(r => r.action === 'new' && !r.data.loc).map(r => r.data.locCode))] : [];
+    const doCount = counts.new + counts.update;
+    const what = kind === 'opening' ? `${palletTotal} pallet${palletTotal === 1 ? '' : 's'}` : `${counts.new} new, ${counts.update} update${counts.update === 1 ? '' : 's'}`;
+    const badge2 = a => a === 'error' ? '<span class="badge void">error</span>' : a === 'update' ? '<span class="badge hold">update</span>' : a === 'skip' ? '<span class="badge">skip</span>' : '<span class="badge open">new</span>';
+    const shownCols = Object.keys(idx);
+    const resOut = $('#imp-out', out);
+    resOut.innerHTML = `
+      <div class="card">
+        <div class="row spread"><h2 style="margin:0">Check: ${esc(source)}</h2>
+          <span class="muted">${rows.length} row${rows.length === 1 ? '' : 's'}: ${counts.new} new${counts.update ? `, ${counts.update} update` : ''}${counts.skip ? `, ${counts.skip} skip` : ''}${counts.error ? `, <strong style="color:var(--bad)">${counts.error} with errors</strong>` : ''}</span></div>
+        ${unused.length ? `<p class="muted small">Columns not used: ${esc(unused.join(', '))}</p>` : ''}
+        ${newLocs.length ? `<p class="small">Will create ${newLocs.length} location${newLocs.length === 1 ? '' : 's'}: ${esc(newLocs.slice(0, 20).join(', '))}${newLocs.length > 20 ? '…' : ''}</p>` : ''}
+        ${counts.error ? '<div class="notice warn">Rows with errors are skipped. Fix them in the sheet and check again, or import the good rows now.</div>' : ''}
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Row</th><th>Result</th>${shownCols.map(k => `<th>${esc(cols.find(c => c[0] === k)[1])}</th>`).join('')}<th>Problem</th></tr></thead>
+          <tbody>${rows.slice(0, 300).map(r => `<tr class="${r.action === 'error' ? 'imp-err' : ''}"><td>${r.line}</td><td>${badge2(r.action)}</td>
+            ${shownCols.map(k => `<td>${esc(get(r.raw, k))}</td>`).join('')}<td>${esc(r.error || '')}</td></tr>`).join('')}</tbody>
+        </table></div>
+        ${rows.length > 300 ? `<p class="muted small">Showing the first 300 rows of ${rows.length}.</p>` : ''}
+        <div class="btn-row">
+          ${doCount ? `<button class="btn" id="imp-go" type="button">Import ${esc(what)}</button>` : '<span class="muted">Nothing to import.</span>'}
+          ${counts.error ? '<button class="btn secondary" id="imp-errs" type="button">Download rows with errors</button>' : ''}
+        </div>
+        <div id="imp-progress"></div>
+      </div>`;
+    $('#imp-errs', resOut)?.addEventListener('click', () => downloadCsv(`import-errors-${kind}.csv`, [...grid[0], 'Problem'],
+      rows.filter(r => r.error).map(r => [...r.raw, r.error])));
+    $('#imp-go', resOut)?.addEventListener('click', async () => {
+      if (!await askConfirm(`Import ${what}?`, kind === 'opening'
+        ? `This puts ${esc(what)} into ${esc(whById(S.whId).code || 'inventory')} on an Opening Inventory receipt. Pallets that need fixing later can be voided.`
+        : 'Rows marked new are added and rows marked update are overwritten with the sheet\'s values.', 'Import')) return;
+      busy($('#imp-go', resOut), () => runImport(resOut, kind, rows.filter(r => r.action === 'new' || r.action === 'update'), source, newLocs));
+    });
+  }
+
+  async function runImport(box, kind, rows, source, newLocs) {
+    const prog = $('#imp-progress', box);
+    const say = (m, cls = '') => { prog.innerHTML = `<div class="notice ${cls}" style="margin-top:12px">${m}</div>`; };
+    const table = { items: 'items', parties: 'parties', accounts: 'owners', locations: 'locations' }[kind];
+    let done = 0; const fails = [];
+    if (table) {
+      const adds = rows.filter(r => r.action === 'new');
+      for (let i = 0; i < adds.length; i += 200) {
+        const chunk = adds.slice(i, i + 200);
+        try { await q(sb.from(table).insert(chunk.map(r => r.data))); done += chunk.length; }
+        catch (e) {  // one bad row fails the batch: retry one by one to find it
+          for (const r of chunk) { try { await q(sb.from(table).insert(r.data)); done++; } catch (e2) { fails.push([r.line, r.label, friendly(e2)]); } }
+        }
+        say(`Saved ${done} of ${rows.length}…`);
+      }
+      for (const r of rows.filter(r => r.action === 'update')) {
+        const { owner_id, warehouse_id, ...patch } = r.data;   // never move a record to another account/building
+        try { await q(sb.from(table).update(patch).eq('id', r.existing.id)); done++; } catch (e) { fails.push([r.line, r.label, friendly(e)]); }
+        if (done % 25 === 0) say(`Saved ${done} of ${rows.length}…`);
+      }
+    } else {
+      // opening inventory: missing locations, one closed receipt per account, then each pallet
+      for (const code of newLocs) {
+        try { await q(sb.from('locations').insert({ code, loc_type: 'storage', warehouse_id: S.whId })); }
+        catch (e) { if (!/already exists/i.test(friendly(e))) throw e; }
+      }
+      await loadRef();
+      const total = rows.reduce((a, r) => a + r.data.pallets, 0);
+      const byOwner = {};
+      rows.forEach(r => (byOwner[r.data.owner.id] = byOwner[r.data.owner.id] || []).push(r));
+      const receipts = [];
+      for (const [ownerId, list] of Object.entries(byOwner)) {
+        const [rc] = await q(sb.from('receipts').insert({ vendor_name: 'OPENING INVENTORY', is_opening: true, warehouse_id: S.whId, owner_id: ownerId,
+          notes: `Spreadsheet import: ${source}` }).select('id, receipt_no'));
+        receipts.push(rc);
+        for (const r of list) {
+          const loc = whLocations().find(l => l.code.toUpperCase() === r.data.locCode);
+          for (let n = 0; n < r.data.pallets; n++) {
+            try {
+              await q(sb.rpc('wms_import_opening_pallet', { p_receipt_id: rc.id, p_item_id: r.data.item.id, p_qty: r.data.qty, p_lot_number: r.data.lot,
+                p_location_id: loc?.id || null, p_customer_pallet_id: r.data.cust_id || null, p_production_date: r.data.prod, p_expiration_date: r.data.exp,
+                p_ref1: r.data.ref1 || null, p_ref2: r.data.ref2 || null, p_received_on: r.data.received }));
+              done++;
+            } catch (e) { fails.push([r.line, r.label, friendly(e)]); break; }
+            if (done % 10 === 0) say(`Loaded ${done} of ${total} pallets…`);
+          }
+        }
+        await q(sb.rpc('wms_close_receipt', { p_receipt_id: rc.id })).catch(() => {});
+      }
+      rows.receipts = receipts;
+    }
+    await loadRef();
+    const recLinks = (rows.receipts || []).map(rc => `<a href="#/receipt/${rc.id}">${esc(rc.receipt_no)}</a>`).join(', ');
+    say(`<strong>Done: ${done} ${kind === 'opening' ? 'pallets loaded' : 'saved'}.</strong>${recLinks ? ' Receipt ' + recLinks + '.' : ''}${fails.length ? ` ${fails.length} failed (below).` : ''}
+      ${fails.length ? `<div class="table-wrap" style="margin-top:8px"><table class="data"><thead><tr><th>Row</th><th>Record</th><th>Problem</th></tr></thead>
+        <tbody>${fails.map(f => `<tr><td>${f[0]}</td><td>${esc(f[1])}</td><td>${esc(f[2])}</td></tr>`).join('')}</tbody></table></div>` : ''}`, fails.length ? 'warn' : 'ok');
+    $('#imp-go', box)?.remove();
+    toast(`Import finished: ${done} ${kind === 'opening' ? 'pallets' : 'rows'}.`);
   }
 
   function setupAccounts(out) {

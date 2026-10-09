@@ -3,7 +3,27 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v1.0.0 adds:**
+**v1.1.0 adds:**
+- **Spreadsheet import** (Setup > Import, managers): items, ship-to & vendors,
+  accounts, locations, and **opening inventory**.
+  - **Input:** a CSV or Excel file, or rows pasted straight from Excel or Google
+    Sheets.
+  - **Templates:** downloadable, using your own field names (BIN Class, Pallet
+    ID, PGID).
+  - **Check before saving:** a preview flags every bad row with the reason.
+    Bad rows can be downloaded to fix. Matching records update when "Update
+    existing" is checked.
+  - **Opening inventory:** loads the pallets already in the building onto a
+    closed "OPENING INVENTORY" receipt. Pallets keep their original received
+    dates, missing locations can be created, and none of it bills as inbound
+    (no handling-in, arrival storage or receiving fee). Those pallets bill
+    storage on the 1st like any other.
+- **Schedule lanes:** Inbound and Outbound show as separate lanes in the Day and
+  Week views. "Together" switches back to the combined view.
+- **"Modern" theme ready:** white, black hairlines, square corners. Not turned
+  on; waiting on the branding decision.
+
+**v1.0.0 added:**
 - **Inventory screen** (menu > Inventory):
   - Filter by search words, location/bay, account, and on hand/hold.
   - **Search:** every word must match, so `1234 10-08/26` finds item 1234 *and*
@@ -81,8 +101,8 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–010 and the `admin-users` Edge Function.
-> **v1.0 needs migration 010** (`supabase/migrations/010_reports.sql`) run
+> **Database:** migrations 001–011 and the `admin-users` Edge Function.
+> **v1.1 needs migration 011** (`supabase/migrations/011_import.sql`) run
 > before the new app files go live.
 
 ## Files

@@ -273,12 +273,24 @@ table.data td.num, table.data th.num { text-align: right; }
 .ev.compact .ev-time { font-size: 13px; }
 .ev.compact .ev-dir { margin-top: 0; }
 .ev.compact .ev-name { font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev.compact .ev-sub { display: none; }
+@media (min-width: 900px) {
+  .week .ev.compact { flex-wrap: wrap; row-gap: 2px; }
+  .week .ev.compact .ev-name { flex-basis: 100%; }
+  .week .ev.compact .ev-sub { display: block; flex-basis: 100%; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 .week { display: grid; grid-template-columns: 1fr; gap: 10px; }
 @media (min-width: 900px) { .week { grid-template-columns: repeat(7, minmax(0, 1fr)); } .view:has(.week) { max-width: 1300px; } }
 .week-day { background: #fafafb; border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; min-height: 80px; }
 .week-day.today { border: 2px solid var(--red); }
 .week-head { display: flex; justify-content: space-between; align-items: baseline; text-decoration: none; color: var(--ink); margin-bottom: 6px; }
 .week-empty { padding: 4px; }
+.lane { margin-bottom: 18px; }
+.lane-head { display: flex; align-items: baseline; gap: 10px; font-size: 19px; margin: 6px 0 8px; padding-left: 10px; border-left: 5px solid #2b5ea7; }
+.lane-out .lane-head { border-left-color: var(--red); }
+.lane-head .muted { font-size: 15px; font-weight: 600; }
+.day-split { display: grid; grid-template-columns: 1fr; gap: 0 18px; }
+@media (min-width: 900px) { .day-split { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); } .view:has(.day-split) { max-width: 1300px; } }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 14px 0 6px; }
 .lg::before { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; background: #8a8f98; }
 .lg.active::before { background: #d68a00; } .lg.ready::before { background: var(--ok); }
@@ -408,3 +420,52 @@ a.kpi:hover { border-color: #b9b9c0; }
   body.office .hdr-info { display: flex; gap: 14px; align-items: center; font-size: 15px; opacity: .95; white-space: nowrap; margin-right: 6px; }
   body.office #hdr-wx:not(:empty) { padding-right: 14px; border-right: 1px solid rgba(255,255,255,.45); }
 }
+
+/* ======================================================================
+   "Modern" theme: bright white, black hairlines, square corners.
+   Turned on by <body class="theme-modern">. Everything else is unchanged.
+   ====================================================================== */
+body.theme-modern {
+  --red: #111111; --red-dark: #000000; --black: #111111;
+  --line: #e2e2e0; --bg: #ffffff; --card: #ffffff; --muted: #6b6b68; --radius: 0px;
+  letter-spacing: .1px;
+}
+body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 1px solid #111; }
+body.theme-modern .brand { color: #111; }
+body.theme-modern .brand-mark { background: #111; border-radius: 0; letter-spacing: 2px; font-weight: 700; }
+body.theme-modern .brand-text { font-weight: 300; letter-spacing: 3px; text-transform: uppercase; font-size: 16px; }
+body.theme-modern .header-right button { color: #111; border: 1px solid #111; border-radius: 0; }
+body.theme-modern .wh-switch { background: #fff; color: #111; border: 1px solid #111; border-radius: 0; }
+body.theme-modern .wh-tag { background: #fff; color: #111; border: 1px solid #111; border-radius: 0; font-weight: 600; letter-spacing: 1.5px; }
+body.theme-modern #hdr-wx:not(:empty) { border-right-color: #cfcfcc; }
+body.theme-modern h1 { font-weight: 300; letter-spacing: .5px; }
+body.theme-modern h2 { font-weight: 500; }
+body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile { border-radius: 0; border-color: var(--line); box-shadow: none; }
+body.theme-modern .card.accent { border-top: 2px solid #111; }
+body.theme-modern .tile { border-left: 2px solid #111; }
+body.theme-modern .btn, body.theme-modern input, body.theme-modern select, body.theme-modern textarea,
+body.theme-modern .tabs a, body.theme-modern .notice, body.theme-modern .modal-card, body.theme-modern .toast { border-radius: 0; }
+body.theme-modern .btn { font-weight: 600; letter-spacing: .6px; text-transform: uppercase; font-size: 15px; }
+body.theme-modern .btn.secondary { background: #fff; color: #111; border-color: #111; }
+body.theme-modern .btn.danger { color: #b3261e; border-color: #b3261e; }
+body.theme-modern input, body.theme-modern select, body.theme-modern textarea { border: 1px solid #bdbdba; }
+body.theme-modern input:focus, body.theme-modern select:focus, body.theme-modern textarea:focus { outline: 2px solid rgba(17,17,17,.15); border-color: #111; }
+body.theme-modern .badge { border-radius: 0; font-weight: 600; letter-spacing: 1px; }
+body.theme-modern .kpi-label, body.theme-modern table.data th { letter-spacing: 1.2px; font-weight: 600; }
+body.theme-modern .kpi-value { font-weight: 300; font-size: 30px; }
+@media (min-width: 1100px) { body.theme-modern.office .kpi-value { font-size: 28px; } }
+body.theme-modern .big-money { font-weight: 300; }
+body.theme-modern .hbar-fill { border-radius: 0; } body.theme-modern .vbar-fill { border-radius: 0; }
+body.theme-modern .back, body.theme-modern a { color: #111; }
+body.theme-modern .toast { background: #111; }
+@media (min-width: 1100px) {
+  body.theme-modern.office .sidenav { background: #fff; border-right: 1px solid #e2e2e0; padding-top: 18px; }
+  body.theme-modern.office .sidenav a { color: #555; font-weight: 500; border-radius: 0; letter-spacing: .3px; }
+  body.theme-modern.office .sidenav a:hover { background: #f4f4f2; color: #111; }
+  body.theme-modern.office .sidenav a.active { background: #fff; color: #111; font-weight: 700; border-left: 2px solid #111; }
+  body.theme-modern.office .nav-foot { color: #8a8a86; }
+  body.theme-modern.office .view { padding-top: 28px; }
+}
+
+/* import */
+tr.imp-err td { background: var(--bad-bg); }
