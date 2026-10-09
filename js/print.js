@@ -47,9 +47,9 @@ const WmsPrint = (() => {
   // identifier labels configured in Company setup
   function idDefs(settings) {
     const st = settings || {};
-    const out = [{ field: 'customer_pallet_id', label: st.cust_pallet_label || 'Customer Pallet ID' }];
-    if (st.ref1_label) out.push({ field: 'ref1', label: st.ref1_label });
-    if (st.ref2_label) out.push({ field: 'ref2', label: st.ref2_label });
+    const out = [{ field: 'customer_pallet_id', label: st.cust_pallet_label || 'Customer Pallet ID', barcode: !!st.cust_pallet_barcode }];
+    if (st.ref1_label) out.push({ field: 'ref1', label: st.ref1_label, barcode: !!st.ref1_barcode });
+    if (st.ref2_label) out.push({ field: 'ref2', label: st.ref2_label, barcode: !!st.ref2_barcode });
     return out;
   }
   const lotLabel = st => (st && st.lot_label) || 'Lot / Production #';
@@ -59,12 +59,14 @@ const WmsPrint = (() => {
   function labels(pallets, settings, copies = 1) {
     const company = esc((settings?.company_name || '').replace(/_/g, ' '));
     const ids = idDefs(settings);
-    const one = p => `
+    const one = p => {
+      const extraBc = ids.filter(d => d.barcode && p[d.field]).length;   // shrink the big barcode to make room
+      return `
       <section class="lbl">
         <div class="lbl-top"><span>${company}</span><span>${esc(fmtDate(p.received_at))}</span></div>
         <div class="lbl-caption">WMS PALLET ID</div>
         <div class="lbl-lp">${esc(p.lp_id)}</div>
-        <svg class="bc lbl-bc" data-value="${esc(p.lp_id)}" data-h="90"></svg>
+        <svg class="bc lbl-bc ${extraBc >= 2 ? 'tight' : ''}" data-value="${esc(p.lp_id)}" data-h="90"></svg>
         <div class="lbl-sku">${esc(p.sku)}</div>
         <div class="lbl-desc">${esc(p.description)}</div>
         <div class="lbl-grid">
@@ -72,13 +74,16 @@ const WmsPrint = (() => {
           <div class="right"><div class="lbl-caption">QTY</div><div class="lbl-val big">${esc(fmtQty(p.qty))} <small>${esc(p.uom)}</small></div></div>
         </div>
         ${p.lot_number ? `<svg class="bc lbl-bc-sm" data-value="${esc(p.lot_number)}" data-h="40"></svg>` : ''}
-        ${ids.filter(d => p[d.field]).map(d =>
-          `<div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('')}
+        ${ids.filter(d => p[d.field]).map(d => d.barcode
+          ? `<div class="lbl-idbc"><div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>
+              <svg class="bc lbl-bc-id" data-value="${esc(p[d.field])}" data-h="36"></svg></div>`
+          : `<div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('')}
         ${(p.production_date || p.expiration_date) ? `<div class="lbl-dates">
             ${p.production_date ? `Prod: ${esc(fmtDate(p.production_date))}` : ''}
             ${p.expiration_date ? `&nbsp;&nbsp;Exp: ${esc(fmtDate(p.expiration_date))}` : ''}</div>` : ''}
         <div class="lbl-foot">Receipt ${esc(p.receipt_no || '')}</div>
       </section>`;
+    };
 
     let html = '';
     for (const p of pallets) for (let i = 0; i < copies; i++) html += one(p);
@@ -94,6 +99,9 @@ const WmsPrint = (() => {
         .lbl-caption { font-size: 8pt; font-weight: 700; letter-spacing: .5pt; color: #000; }
         .lbl-lp { font-family: "Courier New", monospace; font-weight: 800; font-size: 34pt; line-height: 1; margin: 1pt 0 5pt; }
         .lbl-bc { width: 100%; height: 1.05in; display: block; }
+        .lbl-bc.tight { height: .8in; }
+        .lbl-bc-id { width: 62%; height: .34in; display: block; margin-top: 1pt; }
+        .lbl-idbc { margin-top: 2pt; }
         .lbl-bc-sm { width: 70%; height: .42in; display: block; margin-top: 4pt; }
         .lbl-sku { font-size: 24pt; font-weight: 800; margin-top: 8pt; line-height: 1.05; }
         .lbl-desc { font-size: 12pt; margin-bottom: 6pt; max-height: .42in; overflow: hidden; }
