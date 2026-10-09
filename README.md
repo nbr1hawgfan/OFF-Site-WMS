@@ -3,7 +3,30 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.9.0 adds a dashboard and desktop layout:**
+**v1.0.0 adds:**
+- **Inventory screen** (menu > Inventory):
+  - Filter by search words, location/bay, account, and on hand/hold.
+  - **Search:** every word must match, so `1234 10-08/26` finds item 1234 *and*
+    that lot.
+  - **Location / bay:** matches the start of the code, so `A01` finds A01-1,
+    A01-2, ...
+  - **Views:** each pallet, or totals per item and lot (click a line to see its
+    pallets). Click a column header to sort.
+  - **Output:** Export CSV, Print List, and **Location Report (QR)**, a count
+    sheet grouped by location with a QR code per pallet. Scan a QR in Lookup or
+    Dock Move.
+- **New reports** (Reports page), each on screen with Export and Print:
+  - **Lot trace / recall:** where every pallet of a lot came from and went.
+  - **Inventory as of a date:** on hand at the end of any day.
+  - **Adjustments & voids:** every quantity change, hold and void, with the
+    reason and who did it.
+- **Header clock and weather** on desktop. Weather is for the selected
+  warehouse's town (its address in Setup > Warehouses, else the company
+  address), from Open-Meteo, refreshed every 20 minutes.
+- **Exports page through all rows**, so large files are no longer cut off at
+  1,000 rows.
+
+**v0.9.0 added a dashboard and desktop layout:**
 - **Dashboard home:**
   - Headline numbers: pallets on hand, SKUs, received/shipped in the last 30
     days, open loads, today's trucks, and billing month-to-date (managers).
@@ -58,8 +81,8 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–009 and the `admin-users` Edge Function.
-> **v0.8 needs migration 009** (`supabase/migrations/009_billing.sql`) run
+> **Database:** migrations 001–010 and the `admin-users` Edge Function.
+> **v1.0 needs migration 010** (`supabase/migrations/010_reports.sql`) run
 > before the new app files go live.
 
 ## Files

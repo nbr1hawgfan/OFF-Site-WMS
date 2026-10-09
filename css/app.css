@@ -386,3 +386,25 @@ a.kpi:hover { border-color: #b9b9c0; }
   body.office .modal-card { max-width: 640px; }
 }
 @media (min-width: 1100px) and (max-width: 1280px) { body.office .dash-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- inventory screen ---------- */
+.filters { padding: 12px 14px; }
+.filter-row { display: grid; grid-template-columns: 1fr; gap: 0 12px; }
+@media (min-width: 620px) { .filter-row { grid-template-columns: 2fr 1fr 1fr; } }
+@media (min-width: 1100px) { body.office .filter-row { grid-template-columns: 2.2fr 1fr 1.4fr 1fr 1.2fr; } }
+.filter-row .field { margin-bottom: 8px; min-width: 0; }
+.mono { font-family: "SFMono-Regular", Consolas, Menlo, monospace; }
+.inv-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.inv-table th.sortable:hover { color: var(--ink); }
+.inv-table tbody tr { cursor: pointer; }
+.inv-table tbody tr:hover { background: #f6f6f8; }
+.inv-table tfoot td { font-weight: 800; border-top: 2px solid var(--black); }
+.inv-table td { white-space: nowrap; }
+.inv-table td.wrap { white-space: normal; min-width: 160px; }
+
+/* ---------- header clock + weather ---------- */
+.hdr-info { display: none; }
+@media (min-width: 1100px) {
+  body.office .hdr-info { display: flex; gap: 14px; align-items: center; font-size: 15px; opacity: .95; white-space: nowrap; margin-right: 6px; }
+  body.office #hdr-wx:not(:empty) { padding-right: 14px; border-right: 1px solid rgba(255,255,255,.45); }
+}

@@ -508,5 +508,80 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.5in;');
   }
 
-  return { labels, receipt, bol, loadSheet, unloadSheet, statement };
+  // QR code as inline SVG (falls back to the plain text if the QR library didn't load)
+  function qrSvg(text, px) {
+    try {
+      const q = window.qrcode(0, 'M');
+      q.addData(String(text)); q.make();
+      const n = q.getModuleCount();
+      let d = '';
+      for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) d += `M${c} ${r}h1v1h-1z`;
+      return `<svg viewBox="-2 -2 ${n + 4} ${n + 4}" width="${px}" height="${px}" shape-rendering="crispEdges"><rect x="-2" y="-2" width="${n + 4}" height="${n + 4}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+    } catch (e) { return `<span class="mono">${esc(text)}</span>`; }
+  }
+
+  function docHead(s, title, sub) {
+    const company = esc((s.company_name || '').replace(/_/g, ' '));
+    return `<div class="tb-head"><div><div class="tb-co">${company}</div><div class="tb-sub">${esc(sub || '')}</div></div>
+      <div class="tb-title"><h1>${esc(title)}</h1><div>${esc(fmtDateTime(new Date()))}</div></div></div>`;
+  }
+  const TB_CSS = `
+    .tb { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9pt; }
+    .tb-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5pt solid #C41230; padding-bottom: 5pt; margin-bottom: 8pt; }
+    .tb-co { font-size: 13pt; font-weight: 800; }
+    .tb-sub { font-size: 9pt; color: #333; }
+    .tb-title { text-align: right; } .tb-title h1 { font-size: 15pt; margin: 0; }
+    .tb table { width: 100%; border-collapse: collapse; }
+    .tb th, .tb td { border-bottom: .5pt solid #aaa; padding: 2.5pt 4pt; text-align: left; vertical-align: middle; }
+    .tb th { font-size: 7.5pt; text-transform: uppercase; background: #eee; }
+    .tb thead { display: table-header-group; }
+    .tb tr { page-break-inside: avoid; }
+    .tb .num { text-align: right; }
+    .tb .mono { font-family: "Courier New", monospace; font-weight: 700; }
+    .tb tfoot td { font-weight: 800; border-top: 1.2pt solid #000; }`;
+
+  /* any on-screen table, printed (letter landscape) */
+  function table(title, sub, cols, rows, settings) {
+    const html = `<style>${TB_CSS}</style><div class="tb">${docHead(settings || {}, title, sub)}
+      <table><thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(r => `<tr>${r.map((v, i) => `<td class="${cols[i].num ? 'num' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+      <div style="margin-top:6pt;font-size:8pt;color:#555">${rows.length} row${rows.length === 1 ? '' : 's'}</div></div>`;
+    printDoc(html, 'size: letter landscape; margin: 0.4in;');
+  }
+
+  /* location / cycle-count report: pallets grouped by location, a QR per pallet */
+  function locationReport(pallets, sub, settings) {
+    const s = settings || {};
+    const ids = idDefs(s).filter(d => pallets.some(p => p[d.field]));
+    const locs = [];
+    for (const p of pallets) {
+      const k = (p.warehouse_code ? p.warehouse_code + ' ' : '') + (p.location || '(no location)');
+      if (!locs.length || locs[locs.length - 1].k !== k) locs.push({ k, rows: [] });
+      locs[locs.length - 1].rows.push(p);
+    }
+    const html = `<style>${TB_CSS}
+        .lr-loc { font-size: 12pt; font-weight: 800; margin: 10pt 0 3pt; padding: 3pt 6pt; background: #111; color: #fff; page-break-after: avoid; }
+        .lr td.qr { width: 0.62in; padding: 2pt; }
+        .lr td.qr svg { display: block; }
+        .lr .cnt { width: 0.9in; border-bottom: 1pt solid #000; }
+        .lr-sign { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24pt; margin-top: 24pt; }
+        .lr-sign div { border-top: 1pt solid #000; padding-top: 2pt; font-size: 8pt; }
+      </style>
+      <div class="tb lr">${docHead(s, 'Location Report', sub + ' · ' + pallets.length + ' pallets in ' + locs.length + ' location' + (locs.length === 1 ? '' : 's'))}
+        ${locs.map(l => `
+          <div class="lr-loc">${esc(l.k)} &nbsp;·&nbsp; ${l.rows.length} pallet${l.rows.length === 1 ? '' : 's'}</div>
+          <table>
+            <thead><tr><th>QR</th><th>WMS Pallet ID</th>${ids.map(d => `<th>${esc(d.label)}</th>`).join('')}<th>SKU</th><th>Description</th>
+              <th>${esc(lotLabel(s))}</th><th class="num">Qty</th><th>UOM</th><th>Counted</th></tr></thead>
+            <tbody>${l.rows.map(p => `<tr>
+              <td class="qr">${qrSvg(p.lp_id, 44)}</td><td class="mono">${esc(p.lp_id)}${p.status === 'hold' ? ' <b>HOLD</b>' : ''}</td>
+              ${ids.map(d => `<td>${esc(p[d.field] || '')}</td>`).join('')}<td>${esc(p.sku)}</td><td>${esc(p.description || '')}</td>
+              <td>${esc(p.lot_number || '')}</td><td class="num">${esc(fmtQty(p.qty_on_hand))}</td><td>${esc(p.uom || '')}</td><td class="cnt"></td></tr>`).join('')}</tbody>
+          </table>`).join('')}
+        <div class="lr-sign"><div>Counted by</div><div>Date / time</div><div>Verified by</div></div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.4in;');
+  }
+
+  return { labels, receipt, bol, loadSheet, unloadSheet, statement, table, locationReport };
 })();
