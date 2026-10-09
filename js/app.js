@@ -138,8 +138,8 @@
       + list.map(o => `<option value="${o.id}" ${o.id === sel ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('');
   }
   // printed documents: ship-from address comes from the warehouse when it has one
-  function docSettings(whId) {
-    const w = whById(whId), base = { ...(S.settings || {}) };
+  function docSettings(whId, ownerId) {
+    const w = whById(whId), base = { ...(S.settings || {}), ...idSettings(ownerId) };
     if (w.address_line1) Object.assign(base, { address_line1: w.address_line1, address_line2: w.address_line2, city: w.city, state: w.state, zip: w.zip, phone: w.phone || base.phone });
     base.warehouse_code = multiWh() ? w.code : '';
     return base;
@@ -149,25 +149,60 @@
   /* customer-configurable identifier labels (Company setup) */
   const REF_NUMS = [1, 2, 3, 4, 5, 6, 7];
   const REF_COLS = REF_NUMS.map(n => 'ref' + n).join(', ');
+  /* Identifier setup can be per account (owners.id_rules, same keys as settings).
+     Order: the account's own -> its bill-to master's -> Setup > Company.
+     idSettings(ownerId) gives one account's rules; with no account (mixed lists,
+     exports) the accounts' setups are merged: names joined with " / ". */
+  const ID_KEYS = ['cust_pallet_label', 'cust_pallet_required', 'cust_pallet_barcode',
+    ...REF_NUMS.flatMap(n => ['_label', '_required', '_unique', '_barcode'].map(s => 'ref' + n + s))];
+  function idRulesOf(ownerId) {
+    if (!ownerId) return null;
+    const o = ownerById(ownerId);
+    if (o.id_rules) return o.id_rules;
+    return o.bill_to_id ? ownerById(o.bill_to_id).id_rules || null : null;
+  }
+  function companyIdSet() {
+    const st = S.settings || {};
+    return Object.fromEntries(ID_KEYS.map(k => [k, st[k] ?? null]));
+  }
+  function ruleSet(r) {
+    const out = Object.fromEntries(ID_KEYS.map(k => [k, r[k] ?? (k.endsWith('_label') ? null : false)]));
+    out.cust_pallet_label = out.cust_pallet_label || S.settings?.cust_pallet_label || 'Customer Pallet ID';
+    return out;
+  }
+  function idSettings(ownerId) {
+    if (ownerId) { const r = idRulesOf(ownerId); return r ? ruleSet(r) : companyIdSet(); }
+    const owners = (S.owners || []).filter(o => o.active !== false);
+    if (!owners.some(o => idRulesOf(o.id))) return companyIdSet();
+    const sets = [...new Map(owners.map(o => { const r = idRulesOf(o.id); return [r ? JSON.stringify(r) : '', r ? ruleSet(r) : companyIdSet()]; })).values()];
+    const out = {};
+    for (const k of ID_KEYS) {
+      if (k.endsWith('_label')) {
+        const names = [...new Set(sets.map(s => (s[k] || '').trim()).filter(Boolean))];
+        out[k] = names.length ? names.join(' / ') : null;
+      } else if (k.endsWith('_required')) out[k] = sets.every(s => !!s[k]);
+      else out[k] = sets.some(s => !!s[k]);
+    }
+    out.cust_pallet_label = out.cust_pallet_label || 'Customer Pallet ID';
+    return out;
+  }
   const lbl = {
     lot: () => S.settings?.lot_label || 'Lot / Production #',
     lotShort: () => (S.settings?.lot_label || 'Lot').split(' /')[0].trim(),
-    cust: () => S.settings?.cust_pallet_label || 'Customer Pallet ID',
-    ref1: () => S.settings?.ref1_label || null,
-    ref2: () => S.settings?.ref2_label || null,
-    ref: n => S.settings?.['ref' + n + '_label'] || null
+    cust: ownerId => idSettings(ownerId).cust_pallet_label || 'Customer Pallet ID',
+    ref: (n, ownerId) => idSettings(ownerId)['ref' + n + '_label'] || null
   };
-  // extra identifiers that are switched on: [{ key, field, label, required, unique }]
-  function idFields() {
-    const st = S.settings || {};
-    const out = [{ key: 'cust_id', field: 'customer_pallet_id', label: lbl.cust(), required: !!st.cust_pallet_required, unique: true }];
-    // identifiers 2-8 (ref1..ref7): shown only once named in Setup > Company
+  // identifiers that are switched on for an account: [{ key, field, label, required, unique }]
+  function idFields(ownerId) {
+    const st = idSettings(ownerId);
+    const out = [{ key: 'cust_id', field: 'customer_pallet_id', label: st.cust_pallet_label, required: !!st.cust_pallet_required, unique: true }];
+    // identifiers 2-8 (ref1..ref7): shown only once named
     for (const n of REF_NUMS) if (st['ref' + n + '_label']) out.push({ key: 'ref' + n, field: 'ref' + n, label: st['ref' + n + '_label'], required: !!st['ref' + n + '_required'], unique: !!st['ref' + n + '_unique'] });
     return out;
   }
   // "Pallet ID P-1 · PGID PG-7" for list rows
-  function idText(p) {
-    return idFields().filter(f => p[f.field]).map(f => `${esc(f.label)} ${esc(p[f.field])}`).join(' &middot; ');
+  function idText(p, ownerId) {
+    return idFields(ownerId || p.owner_id).filter(f => p[f.field]).map(f => `${esc(f.label)} ${esc(p[f.field])}`).join(' &middot; ');
   }
   function lotText(p) {
     return p.lot_number ? `${esc(lbl.lotShort())} ${esc(p.lot_number)}` : `No ${esc(lbl.lotShort().toLowerCase())}`;
@@ -1124,7 +1159,7 @@
               ${rcptLocs.map(l => `<option value="${l.id}" ${(lastLocOk ? last.location_id === l.id : dock && dock.id === l.id) ? 'selected' : ''}>${esc(l.code)}</option>`).join('')}
             </select></div>
         </div>
-        ${idFields().map(f => `
+        ${idFields(rcpt.owner_id).map(f => `
         <div class="field"><label for="${f.key}">${esc(f.label)} <span class="muted small">${f.required ? '(required)' : '(optional)'}</span></label>
           <div class="input-scan"><input id="${f.key}" maxlength="60" ${f.required ? 'required' : ''}
             ${f.key === 'cust_id' && !f.required ? 'placeholder="Leave blank to use ours"' : ''}>${scanBtn(f.key)}</div>
@@ -1155,7 +1190,7 @@
             <div class="lp">${esc(p.lp_id)} ${p.status !== 'on_hand' ? badge(p.status) : ''}</div>
             <div><strong>${esc(it.sku)}</strong> &middot; ${lotText(p)}</div>
             <div class="meta">${esc(locLabel(p.location_id))}${p.expiration_date ? ' &middot; Exp ' + esc(fmtDate(p.expiration_date)) : ''}</div>
-            ${idText(p) ? `<div class="meta">${idText(p)}</div>` : ''}
+            ${idText(p, rcpt.owner_id) ? `<div class="meta">${idText(p, rcpt.owner_id)}</div>` : ''}
           </div>
           <div class="qty">${esc(fmtQty(p.qty_received))}<div class="meta">${esc(it.uom || '')}</div></div>
           ${p.status !== 'void' ? `<div class="row" style="grid-column:1/-1">
@@ -1238,7 +1273,7 @@
 
       // a handheld scanner sends Enter after each scan: step through the
       // identifier fields, then Receive, instead of submitting early
-      const ids = idFields();
+      const ids = idFields(rcpt.owner_id);
       $('#lot', form).addEventListener('keydown', ev => {
         if (ev.key === 'Enter') { ev.preventDefault(); $('#qty', form).focus(); }
       });
@@ -1287,7 +1322,7 @@
                 p_production_date: $('#prod_date', form).value || null,
                 p_expiration_date: $('#exp_date', form).value || null,
                 p_notes: strOrNull($('#p_notes', form).value),
-                ...Object.fromEntries(REF_NUMS.filter(n => lbl.ref(n)).map(n => ['p_ref' + n, vals['ref' + n]]))
+                ...Object.fromEntries(ids.filter(f => f.key !== 'cust_id').map(f => ['p_' + f.key, vals[f.key]]))
               })));
             }
           } catch (err) {
@@ -1305,7 +1340,7 @@
           // ready for the next pallet: back to the first identifier that was used
           const firstUsed = ids.find(f => vals[f.key] || f.required);
           (firstUsed ? $('#' + firstUsed.key) : $('#qty'))?.focus();
-          if (doPrint) WmsPrint.labels(received.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id), copies);
+          if (doPrint) WmsPrint.labels(received.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id, rcpt.owner_id), copies);
         });
       };
     }
@@ -1313,7 +1348,7 @@
     /* pallet buttons */
     $$('[data-label]', page).forEach(b => b.onclick = () => {
       const p = pallets.find(x => x.id === b.dataset.label);
-      WmsPrint.labels([palletForPrint(p, rcpt)], docSettings(rcpt.warehouse_id), loadPref('labelCopies', 1));
+      WmsPrint.labels([palletForPrint(p, rcpt)], docSettings(rcpt.warehouse_id, rcpt.owner_id), loadPref('labelCopies', 1));
     });
     $$('[data-void]', page).forEach(b => b.onclick = async () => {
       const p = pallets.find(x => x.id === b.dataset.void);
@@ -1329,8 +1364,8 @@
 
     /* receipt actions */
     $('#print-rcpt', page)?.addEventListener('click', () =>
-      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id), ownerById(rcpt.owner_id), billToOf(rcpt.owner_id)));
-    $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id), ownerById(rcpt.owner_id)));
+      WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id), billToOf(rcpt.owner_id)));
+    $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id)));
     $('#done-unload', page)?.addEventListener('click', async () => {
       const ok = await askConfirm('Done unloading?',
         `${active.length} pallet${active.length === 1 ? '' : 's'} received on ${esc(rcpt.receipt_no)}. The office will review and close it.`, 'Done Unloading');
@@ -1342,7 +1377,7 @@
       });
     });
     $('#print-all', page).onclick = () =>
-      WmsPrint.labels(active.filter(p => p.status !== 'shipped').map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id), loadPref('labelCopies', 1));
+      WmsPrint.labels(active.filter(p => p.status !== 'shipped').map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id, rcpt.owner_id), loadPref('labelCopies', 1));
 
     $('#close-rcpt', page)?.addEventListener('click', async () => {
       const msg = active.length
@@ -1392,7 +1427,7 @@
       return (f.allWh ? qb : qb.eq('warehouse_id', S.whId)).order('pallet_id');
     });
     if (mySeq !== navSeq) return;
-    const ids = idFields();
+    const ids = idFields(f.acct || null);
     render(`
       <div id="inv-page">
         <a class="back" href="#/">&larr; Home</a>
@@ -1556,7 +1591,7 @@
     $('#inv-count').onclick = () => {
       if (!current.pallets.length) return toast('Nothing to print.', 'bad');
       const rows = current.pallets.slice().sort((a, b) => String(a.location || '').localeCompare(String(b.location || ''), undefined, { numeric: true }) || a.lp_id.localeCompare(b.lp_id));
-      WmsPrint.locationReport(rows, filterText(), S.settings);
+      WmsPrint.locationReport(rows, filterText(), { ...S.settings, ...idSettings() });
     };
   }
 
@@ -1660,7 +1695,7 @@
         <dt>Location</dt><dd>${esc(multiWh() ? (p.warehouse_code || '') + ' ' : '')}${esc(p.location || '-')}</dd>
         ${multiOwner() ? `<dt>Account</dt><dd>${esc(p.owner_code || '')} — ${esc(p.owner_name || '')}</dd>` : ''}
         <dt>Status</dt><dd>${badge(p.status)}</dd>
-        ${idFields().filter(f => p[f.field]).map(f => `<dt>${esc(f.label)}</dt><dd>${esc(p[f.field])}</dd>`).join('')}
+        ${idFields(p.owner_id).filter(f => p[f.field]).map(f => `<dt>${esc(f.label)}</dt><dd>${esc(p[f.field])}</dd>`).join('')}
         ${p.origin_ref ? `<dt>LWH Control #</dt><dd>${esc(p.origin_ref)}</dd>` : ''}
         ${p.production_date ? `<dt>Produced</dt><dd>${esc(fmtDate(p.production_date))}</dd>` : ''}
         ${p.expiration_date ? `<dt>Expires</dt><dd>${esc(fmtDate(p.expiration_date))}</dd>` : ''}
@@ -1691,7 +1726,7 @@
       </table></div>`;
 
     $('#pm-rcpt', body).onclick = () => closeModal();
-    $('#pm-label', body).onclick = () => WmsPrint.labels([{ ...p, qty: p.qty_on_hand }], docSettings(p.warehouse_id), loadPref('labelCopies', 1));
+    $('#pm-label', body).onclick = () => WmsPrint.labels([{ ...p, qty: p.qty_on_hand }], docSettings(p.warehouse_id, p.owner_id), loadPref('labelCopies', 1));
     $('#pm-move', body)?.addEventListener('submit', e => {
       e.preventDefault();
       busy($('#pm-move-btn', body), async () => {
@@ -2047,7 +2082,7 @@
             <div class="list-item pallet">
               <div><div class="lp">${esc(l.lp_id)}</div>
                 <div><strong>${esc(l.sku)}</strong> &middot; ${lotText(l)}</div>
-                ${idText(l) ? `<div class="meta">${idText(l)}</div>` : ''}</div>
+                ${idText(l, ship.owner_id) ? `<div class="meta">${idText(l, ship.owner_id)}</div>` : ''}</div>
               <div class="qty">${esc(fmtQty(l.qty))}<div class="meta">${esc(l.uom)}</div></div>
               ${isOpen ? `<div class="row" style="grid-column:1/-1"><button class="btn sm danger" data-unload="${l.pallet_id}">Take off load</button></div>` : ''}
             </div>`).join('') || '<p class="muted">Nothing loaded yet.</p>'}</div>
@@ -2481,7 +2516,7 @@
           <div class="lp">${esc(l.lp_id)}</div>
           <div><strong>${esc(l.sku)}</strong> &middot; ${lotText(l)}</div>
           <div class="meta">${esc(l.location || '')}${!isOpen ? '' : Number(l.qty) < Number(l.qty_on_hand) ? ` &middot; partial: ${esc(fmtQty(l.qty))} of ${esc(fmtQty(l.qty_on_hand))}` : ''}</div>
-          ${idText(l) ? `<div class="meta">${idText(l)}</div>` : ''}
+          ${idText(l, ship.owner_id) ? `<div class="meta">${idText(l, ship.owner_id)}</div>` : ''}
         </div>
         <div class="qty">${esc(fmtQty(l.qty))}<div class="meta">${esc(l.uom)}</div></div>
         ${editable ? `<div class="row" style="grid-column:1/-1"><button class="btn sm danger" data-remove="${l.pallet_id}">Remove</button></div>` : ''}
@@ -2628,8 +2663,8 @@
       toast('Pallet removed.');
     }));
 
-    $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id), ownerById(ship.owner_id), billToOf(ship.owner_id));
-    $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, docSettings(ship.warehouse_id), ownerById(ship.owner_id)));
+    $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id), billToOf(ship.owner_id));
+    $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id)));
 
     $('#ol-form', page)?.addEventListener('submit', e => {
       e.preventDefault();
@@ -3693,7 +3728,7 @@
         ['pallets', 'Pallets (default 1)', ['pallets', 'palletcount', 'numpallets', 'count']],
         ['location', 'Location', ['location', 'loc', 'bin', 'bay', 'slot'], true],
         ['cust_id', lbl.cust(), ['custpalletid', 'customerpalletid', 'palletid', normKey(lbl.cust())]],
-        ...REF_NUMS.filter(n => lbl.ref(n)).map(n => ['ref' + n, lbl.ref(n), ['ref' + n, normKey(lbl.ref(n)), 'unique' + (n + 1)]]),
+        ...REF_NUMS.filter(n => lbl.ref(n)).map(n => ['ref' + n, lbl.ref(n), ['ref' + n, normKey(lbl.ref(n)), ...lbl.ref(n).split(' / ').map(normKey), 'unique' + (n + 1)]]),
         ['received', 'Received date', ['received', 'receiveddate', 'datereceived', 'receivedon', 'date']],
         ['prod', 'Production date', ['productiondate', 'proddate', 'mfgdate']],
         ['exp', 'Expiration date', ['expirationdate', 'expdate', 'expires', 'bestby']]
@@ -3861,7 +3896,9 @@
         const mkItem = kind === 'lwh' && $('#imp-mkitem', out)?.checked;
         if (o && !it && !mkItem) err(`SKU ${sku} is not set up${multiOwner() ? ' for ' + o.code : ''}. Import items first`);
         if (kind === 'lwh' && g('origin') && S.lwhOrigins?.has(g('origin'))) err(`Control # ${g('origin')} is already here`);
-        if (kind === 'lwh') for (const n of REF_NUMS) if (g('ref' + n) && !lbl.ref(n)) err(`Unique${n + 1} has data: name Identifier ${n + 1} in Setup > Company first`);
+        const st = idSettings(o?.id);
+        const idWhere = o && idRulesOf(o.id) ? `the ${ownerById(o.id).id_rules ? o.code : billToOf(o.id).code} account's identifiers (Setup > Accounts)` : 'Setup > Company';
+        if (kind === 'lwh') for (const n of REF_NUMS) if (g('ref' + n) && !st['ref' + n + '_label']) err(`Unique${n + 1} has data: name Identifier ${n + 1} in ${idWhere} first`);
         const qty = numCell(g('qty'));
         if (!(qty > 0)) err('Qty must be more than 0');
         const pallets = idx.pallets === undefined || g('pallets') === '' ? 1 : numCell(g('pallets'));
@@ -3874,17 +3911,16 @@
         if (it?.lot_required && !lot) err(`${lbl.lotShort()} is required for ${sku}`);
         const ids = { cust_id: g('cust_id').toUpperCase(), ...Object.fromEntries(REF_NUMS.map(n => ['ref' + n, g('ref' + n).toUpperCase()])) };
         if (pallets > 1 && Object.values(ids).some(Boolean)) err('A row with pallet IDs must be 1 pallet');
-        const st = S.settings || {};
-        if (st.cust_pallet_required && !ids.cust_id) err(`${lbl.cust()} is required`);
+        if (st.cust_pallet_required && !ids.cust_id) err(`${st.cust_pallet_label} is required`);
         for (const n of REF_NUMS) if (st['ref' + n + '_label'] && st['ref' + n + '_required'] && !ids['ref' + n]) err(`${st['ref' + n + '_label']} is required`);
         // repeats only matter for identifiers that must be unique (customer pallet ID always is)
         for (const [k, v] of Object.entries(ids)) {
           if (!v) continue;
-          const f = k === 'cust_id' ? { label: lbl.cust(), unique: true } : { label: st[k + '_label'], unique: !!st[k + '_unique'] };
+          const f = k === 'cust_id' ? { label: st.cust_pallet_label, unique: true } : { label: st[k + '_label'], unique: !!st[k + '_unique'] };
           if (!f.unique) continue;
-          const key = k + '|' + v;
+          const key = (k === 'cust_id' ? '' : (o?.id || '')) + '|' + k + '|' + v;
           if (seen.has(key)) err(k === 'cust_id' ? `${f.label} ${v} appears twice in this file`
-            : `${f.label} ${v} repeats in this file, but ${f.label} is set to "Unique per pallet" (Setup > Company). Untick it if this value covers several pallets`);
+            : `${f.label} ${v} repeats in this file, but ${f.label} is set to "Unique per pallet" (${idWhere}). Untick it if this value covers several pallets`);
           seen.add(key);
         }
         const dates = { received: parseDateCell(g('received')), prod: parseDateCell(g('prod')), exp: parseDateCell(g('exp')) };
@@ -4033,10 +4069,51 @@
         <a class="list-item ${o.bill_to_id ? 'sub-acct' : ''}" href="#" data-acct="${o.id}" style="${o.active ? '' : 'opacity:.55'}">
           <div class="row spread"><span class="title">${o.bill_to_id ? '<span class="muted">&#8627;</span> ' : ''}${esc(o.code)} — ${esc(o.name)}</span>
             <span>${!o.bill_to_id && subsOf(o.id).length ? `<span class="badge closed">Bill-to &middot; ${subsOf(o.id).length} sub</span> ` : ''}${o.active ? '' : badge('inactive')}</span></div>
-          <div class="meta">${S.items.filter(i => i.owner_id === o.id).length} items${o.bill_to_id ? ' &middot; bills to ' + esc(ownerById(o.bill_to_id).code) : ''}${o.contact_name ? ' &middot; ' + esc(o.contact_name) : ''}${o.email ? ' &middot; ' + esc(o.email) : ''}</div>
+          <div class="meta">${S.items.filter(i => i.owner_id === o.id).length} items${o.id_rules ? ' &middot; own identifiers' : ''}${o.bill_to_id ? ' &middot; bills to ' + esc(ownerById(o.bill_to_id).code) : ''}${o.contact_name ? ' &middot; ' + esc(o.contact_name) : ''}${o.email ? ' &middot; ' + esc(o.email) : ''}</div>
         </a>`).join('')}`;
     $('#add-acct', out).onclick = () => accountForm(null);
     $$('[data-acct]', out).forEach(a => a.onclick = e => { e.preventDefault(); accountForm(rows.find(r => r.id === a.dataset.acct)); });
+  }
+
+  // identifier name/required/unique/barcode grid (Setup > Company and per account)
+  function idEditorHtml(px, s) {
+    return `
+          <div class="field"><label for="${px}-custlbl">Customer pallet ID name <span class="muted small">(LWH Comments)</span></label>
+            <input id="${px}-custlbl" value="${esc(s.cust_pallet_label || 'Customer Pallet ID')}" maxlength="30" required>
+            <div class="row" style="margin-top:6px">
+              <label class="check"><input type="checkbox" id="${px}-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label>
+              <label class="check"><input type="checkbox" id="${px}-custbc" ${s.cust_pallet_barcode ? 'checked' : ''}> Barcode on label</label>
+            </div></div>
+          ${REF_NUMS.map(n => `${n === 3 ? `<details class="more" ${REF_NUMS.slice(2).some(k => s['ref' + k + '_label']) ? 'open' : ''}><summary>Identifiers 4–8 (e.g. Nissan)</summary>` : ''}
+          <div class="field"><label for="${px}-ref${n}">Identifier ${n + 1} name <span class="muted small">(LWH Unique${n + 1})</span></label>
+            <input id="${px}-ref${n}" value="${esc(s['ref' + n + '_label'] || '')}" maxlength="30" placeholder="Leave blank to hide">
+            <div class="row" style="margin-top:6px">
+              <label class="check"><input type="checkbox" id="${px}-ref${n}req" ${s['ref' + n + '_required'] ? 'checked' : ''}> Required</label>
+              <label class="check"><input type="checkbox" id="${px}-ref${n}uniq" ${s['ref' + n + '_unique'] ? 'checked' : ''}> Unique per pallet</label>
+              <label class="check"><input type="checkbox" id="${px}-ref${n}bc" ${s['ref' + n + '_barcode'] ? 'checked' : ''}> Barcode on label</label>
+            </div></div>${n === REF_NUMS[REF_NUMS.length - 1] ? '</details>' : ''}`).join('')}`;
+  }
+  // what an account gets when it has no custom setup, e.g. "Customer Pallet ID, PGID*" (* = required)
+  function idText0(r) {
+    const m = r.bill_to_id ? ownerById(r.bill_to_id) : null;
+    const st = m?.id_rules ? ruleSet(m.id_rules) : companyIdSet();
+    return [[st.cust_pallet_label || 'Customer Pallet ID', st.cust_pallet_required],
+      ...REF_NUMS.filter(n => st['ref' + n + '_label']).map(n => [st['ref' + n + '_label'], st['ref' + n + '_required']])]
+      .map(([l, req]) => l + (req ? '*' : '')).join(', ');
+  }
+  function idEditorRead(px, root) {
+    const row = {
+      cust_pallet_label: $(`#${px}-custlbl`, root).value.trim() || 'Customer Pallet ID',
+      cust_pallet_required: $(`#${px}-custreq`, root).checked,
+      cust_pallet_barcode: $(`#${px}-custbc`, root).checked
+    };
+    for (const n of REF_NUMS) {
+      row['ref' + n + '_label'] = strOrNull($(`#${px}-ref${n}`, root).value);
+      row['ref' + n + '_required'] = $(`#${px}-ref${n}req`, root).checked;
+      row['ref' + n + '_unique'] = $(`#${px}-ref${n}uniq`, root).checked;
+      row['ref' + n + '_barcode'] = $(`#${px}-ref${n}bc`, root).checked;
+    }
+    return row;
   }
 
   function accountForm(o) {
@@ -4059,9 +4136,17 @@
           </select>
           <div class="hint">${o && subsOf(o.id).length ? `This is the bill-to for ${subsOf(o.id).map(x => esc(x.code)).join(', ')}.` : 'Pick a master if this is a plant or location of a bigger customer. It keeps its own items and inventory; charges go on the master\'s statement.'}</div></div>
         <div class="field"><label for="a-notes">Notes</label><input id="a-notes" value="${esc(r.notes || '')}" maxlength="300"></div>
+        <div class="field"><label for="a-idmode">Pallet identifiers</label>
+          <select id="a-idmode">
+            <option value="inherit">${r.bill_to_id && ownerById(r.bill_to_id).id_rules ? `Same as bill-to ${esc(ownerById(r.bill_to_id).code)}` : 'Company setup'} (${esc(idText0(r))})</option>
+            <option value="own" ${r.id_rules ? 'selected' : ''}>Custom for this account</option>
+          </select>
+          <div class="hint">Names and rules for Customer Pallet ID and Unique2–8 on this account's pallets, labels and imports.</div></div>
+        <div id="a-ids" class="grid2" ${r.id_rules ? '' : 'hidden'}>${idEditorHtml('a', r.id_rules || idSettings(r.id || null))}</div>
         <div class="field"><label class="check"><input type="checkbox" id="a-active" ${r.active ? 'checked' : ''}> Active</label></div>
         <button class="btn block" id="acct-save">${o ? 'Save' : 'Add Account'}</button>
       </form>`);
+    $('#a-idmode', body).onchange = () => { $('#a-ids', body).hidden = $('#a-idmode', body).value !== 'own'; };
     $('#acct-form', body).onsubmit = e => {
       e.preventDefault();
       busy($('#acct-save', body), async () => {
@@ -4070,7 +4155,8 @@
           contact_name: strOrNull($('#a-contact', body).value), email: strOrNull($('#a-email', body).value),
           phone: strOrNull($('#a-phone', body).value), billing_address: strOrNull($('#a-bill', body).value),
           notes: strOrNull($('#a-notes', body).value), active: $('#a-active', body).checked,
-          ...(!$('#a-billto', body).disabled ? { bill_to_id: $('#a-billto', body).value || null } : {})
+          ...(!$('#a-billto', body).disabled ? { bill_to_id: $('#a-billto', body).value || null } : {}),
+          ...('id_rules' in r || $('#a-idmode', body).value === 'own' ? { id_rules: $('#a-idmode', body).value === 'own' ? idEditorRead('a', body) : null } : {})
         };
         if (o) await q(sb.from('owners').update(row).eq('id', o.id));
         else await q(sb.from('owners').insert(row));
@@ -4160,25 +4246,12 @@
         </div>
 
         <h2 style="margin-top:18px">Pallet Identifiers</h2>
-        <p class="muted small">Rename the fields to match the customer's paperwork. Extra identifiers only show up once they have a name.</p>
+        <p class="muted small">Rename the fields to match the customer's paperwork. Extra identifiers only show up once they have a name. This is the default; an account can have its own in Setup &gt; Accounts.</p>
         <div class="grid2">
           <div class="field"><label for="c-lotlbl">Lot field name</label>
             <input id="c-lotlbl" value="${esc(s.lot_label || 'Lot / Production #')}" maxlength="30" required>
             <div class="hint">Example: BIN Class. Required or optional is set per item.</div></div>
-          <div class="field"><label for="c-custlbl">Customer pallet ID name</label>
-            <input id="c-custlbl" value="${esc(s.cust_pallet_label || 'Customer Pallet ID')}" maxlength="30" required>
-            <div class="row" style="margin-top:6px">
-              <label class="check"><input type="checkbox" id="c-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label>
-              <label class="check"><input type="checkbox" id="c-custbc" ${s.cust_pallet_barcode ? 'checked' : ''}> Barcode on label</label>
-            </div></div>
-          ${REF_NUMS.map(n => `${n === 3 ? `<details class="more" ${REF_NUMS.slice(2).some(k => s['ref' + k + '_label']) ? 'open' : ''}><summary>Identifiers 4–8 (e.g. Nissan)</summary>` : ''}
-          <div class="field"><label for="c-ref${n}">Identifier ${n + 1} name <span class="muted small">(LWH Unique${n + 1})</span></label>
-            <input id="c-ref${n}" value="${esc(s['ref' + n + '_label'] || '')}" maxlength="30" placeholder="Leave blank to hide">
-            <div class="row" style="margin-top:6px">
-              <label class="check"><input type="checkbox" id="c-ref${n}req" ${s['ref' + n + '_required'] ? 'checked' : ''}> Required</label>
-              <label class="check"><input type="checkbox" id="c-ref${n}uniq" ${s['ref' + n + '_unique'] ? 'checked' : ''}> Unique per pallet</label>
-              <label class="check"><input type="checkbox" id="c-ref${n}bc" ${s['ref' + n + '_barcode'] ? 'checked' : ''}> Barcode on label</label>
-            </div></div>${n === REF_NUMS[REF_NUMS.length - 1] ? '</details>' : ''}`).join('')}
+          ${idEditorHtml('c', s)}
         </div>
         ${'theme' in s ? `
         <h2 style="margin-top:18px">Look</h2>
@@ -4205,16 +4278,8 @@
           default_uom: $('#c-uom', out).value.trim().toUpperCase() || 'EA',
           pallet_tare_lbs: Number($('#c-tare', out).value) || 0,
           lot_label: $('#c-lotlbl', out).value.trim() || 'Lot / Production #',
-          cust_pallet_label: $('#c-custlbl', out).value.trim() || 'Customer Pallet ID',
-          cust_pallet_required: $('#c-custreq', out).checked,
-          cust_pallet_barcode: $('#c-custbc', out).checked
+          ...idEditorRead('c', out)
         };
-        for (const n of REF_NUMS) {
-          row['ref' + n + '_label'] = strOrNull($('#c-ref' + n, out).value);
-          row['ref' + n + '_required'] = $('#c-ref' + n + 'req', out).checked;
-          row['ref' + n + '_unique'] = $('#c-ref' + n + 'uniq', out).checked;
-          row['ref' + n + '_barcode'] = $('#c-ref' + n + 'bc', out).checked;
-        }
         if (!hasPallets) row.lp_prefix = $('#c-prefix', out).value.trim().toUpperCase();
         if ($('#c-theme', out)) {
           const acc = $('#c-accent', out).value.trim();

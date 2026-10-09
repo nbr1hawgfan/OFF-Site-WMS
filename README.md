@@ -3,6 +3,18 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.4.0 identifiers per account** (migration 015):
+- **Setup:** Setup > Accounts > edit > Pallet identifiers > "Custom for this
+  account" gives that account its own names and Required / Unique / Barcode
+  rules for Customer Pallet ID and Unique2–8.
+- **Lookup order:** the account's own setup, then its bill-to master's, then
+  Setup > Company.
+- **Where it applies:** receiving, labels, receipts, BOLs, pallet details and
+  imports. Mixed lists and exports show combined names (e.g. "PGID / Serial").
+- **Unique identifiers** are now checked within the account.
+- **LWH import:** also reads ItemDesc (creates items with real descriptions)
+  and ReceivedDate.
+
 **v1.3.0 lines up with the LWH WMS:**
 - **8 pallet identifiers**, matching LWH's Comments + Unique2–Unique8.
   - **Mapping:** Customer Pallet ID = Comments, identifiers 2–8 = Unique2–8.
@@ -143,7 +155,7 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–014 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–015 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files
