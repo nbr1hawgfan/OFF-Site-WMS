@@ -3,7 +3,17 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.7.0 adds:**
+**v0.8.0 adds billing:**
+- **Rates per customer account:** handling in/out per pallet or unit, per-load
+  fees, storage on arrival and again on the 1st, contract square footage, a flat
+  monthly fee, and the account's own price for each extra charge.
+- **Extra charges** (admin, special handling, after hours, labor, and any you
+  add) on a receipt, a shipment, or the account itself.
+- **Monthly statement** for each account. It's live while the month is open,
+  and you can print it, export it to CSV, or export a pallet-level backup.
+  **Close Month** freezes it; an admin can reopen it.
+
+**v0.7.0 added:**
 - **Multiple warehouses** (Setup > Warehouses): WHSE1, WHSE2, and so on. Each
   building has its own locations, receipts, shipments, schedule and paperwork
   address. Switch buildings from the selector in the red header.
@@ -36,9 +46,9 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–008 and the `admin-users` Edge Function.
-> **v0.7 needs migration 008** (`supabase/migrations/008_warehouses_accounts.sql`)
-> run before the new app files go live.
+> **Database:** migrations 001–009 and the `admin-users` Edge Function.
+> **v0.8 needs migration 009** (`supabase/migrations/009_billing.sql`) run
+> before the new app files go live.
 
 ## Files
 
@@ -88,9 +98,9 @@ server-side and checks the caller on every request. The rules live in
 |---|---|
 | viewer | Look up inventory, view receipts and shipments |
 | lift | **Dock Mode only:** receive onto open receipts, load pallets onto open shipments, move pallets, mark loads loaded/unloaded. Cannot create or edit receipt/shipment details, close receipts, or ship. |
-| operator | Office: create and edit receipts and shipments, order lines, receive, load, move, close receipts, ship |
-| manager | + setup (items, locations), adjust qty, hold/release, reopen/void receipts, void any unshipped pallet |
-| admin | + company info |
+| operator | Office: create and edit receipts and shipments, order lines, receive, load, move, close receipts, ship, add extra charges |
+| manager | + setup (items, locations, accounts, warehouses), billing (rates, statements, close month, remove charges), adjust qty, hold/release, reopen/void receipts, void any unshipped pallet |
+| admin | + company info, reopen a closed billing month |
 
 ## Warehouses and accounts
 
@@ -114,6 +124,52 @@ server-side and checks the caller on every request. The rules live in
   account. Receipts only list that account's items.
 - The account and warehouse lock once a receipt has pallets or a shipment has
   pallets or order lines.
+
+## Billing
+
+**Home > Billing** (managers and admins). Pick a month to see every account's
+total, then tap an account for its statement.
+
+**Rates** (on any statement, tap **Rates**). Leave a box blank if the contract
+doesn't charge it:
+
+| Rate | Billed |
+|---|---|
+| Inbound per pallet / per unit | When each pallet is received |
+| Outbound per pallet / per unit | When the shipment ships. Leave blank for contracts that pay in+out up front on inbound. |
+| Per inbound / outbound load | Once per receipt (the month its first pallet arrived) / per shipment shipped |
+| Storage on arrival, per pallet / unit | In the month the pallet arrives, whatever the day |
+| Storage on the 1st, per pallet / unit | Everything on hand at 12:00 AM on the 1st, including pallets on hold |
+| Contract space (sq ft x rate) | Every month, fixed by contract |
+| Flat monthly fee | Every month |
+| Accessorial prices | This account's price for each charge type, overriding the standard rate |
+
+**Extra charges:**
+- **Where:** office staff (operators and up, not lift drivers) tap **Add
+  Charge** on a receipt or shipment. Managers can also add them from the
+  statement.
+- **Price:** the account's own rate fills in; it can be changed for that one
+  charge.
+- **Removing:** managers can remove a charge while its month is open.
+- **Charge types** (Billing > Charge Types): add your own, e.g. Lumper, Shrink
+  wrap, Re-label, with a standard rate and unit.
+
+**Month end:**
+1. Open last month's statement and review it. **Pallet Detail CSV** lists every
+   pallet behind the numbers: on hand on the 1st, in, and out.
+2. Tap **Print Statement** (or Save as PDF) and/or **Export CSV**.
+3. Tap **Close Month**. The statement is frozen as billed, and charges for that
+   month are locked. A month can only be closed after it ends.
+4. If something was missed, an admin taps **Reopen Month**, fixes it, and
+   closes it again.
+
+**Rules to know:**
+- **Time zone:** months run midnight to midnight, Central time
+  (`settings.timezone`).
+- **Voids:** a voided pallet is never billed. Voiding after a month is closed
+  doesn't change that month's frozen statement.
+- **Accounts:** charges follow the account of the receipt or shipment, so each
+  customer only sees their own loads.
 
 ## Pallet identifiers
 

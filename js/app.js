@@ -48,6 +48,7 @@
     if (/locations_code_key|ux_locations_wh_code/i.test(m)) return 'That location code already exists in this warehouse.';
     if (/ux_owners_code/i.test(m)) return 'That account code is already used.';
     if (/ux_warehouses_code/i.test(m)) return 'That warehouse code is already used.';
+    if (/ux_charge_types_code/i.test(m)) return 'That charge code is already used.';
     if (/ux_pallets_customer_pallet_id/i.test(m)) return `That ${lbl.cust()} is already in use.`;
     if (/Invalid login credentials/i.test(m)) return 'Username/email or password is incorrect.';
     if (/banned/i.test(m)) return 'This login has been turned off. Ask your manager.';
@@ -271,16 +272,17 @@
   }
 
   async function loadRef() {
-    const [settings, items, locations, parties, warehouses, owners] = await Promise.all([
+    const [settings, items, locations, parties, warehouses, owners, chargeTypes] = await Promise.all([
       q(sb.from('settings').select('*').eq('id', 1).single()),
       q(sb.from('items').select('*').order('sku')),
       q(sb.from('locations').select('*').order('sort_order').order('code')),
       q(sb.from('parties').select('*').order('name')),
       q(sb.from('warehouses').select('*').order('sort_order').order('code')),
-      q(sb.from('owners').select('*').order('code'))
+      q(sb.from('owners').select('*').order('code')),
+      can('operator') ? q(sb.from('charge_types').select('*').order('sort_order').order('name')).catch(() => []) : []
     ]);
     S.settings = settings; S.items = items; S.locations = locations; S.parties = parties;
-    S.warehouses = warehouses; S.owners = owners;
+    S.warehouses = warehouses; S.owners = owners; S.chargeTypes = chargeTypes;
     // current warehouse: this device's last choice, else the user's home, else the first
     const ok = id => warehouses.some(w => w.id === id && w.active);
     const pref = loadPref('wh', null);
@@ -352,6 +354,7 @@
       if (a === 'shipment' && b === 'new') return viewNewShipment();
       if (a === 'shipment' && b) return viewShipment(b);
       if (a === 'setup') return viewSetup(b || 'items');
+      if (a === 'billing') return b ? viewStatement(b, c) : viewBilling();
       render(`<div class="card"><h2>Page not found</h2><a class="btn" href="#/">Home</a></div>`);
     } catch (e) {
       console.error(e);
@@ -468,6 +471,7 @@
           <span>${openShip ? `${openShip} open shipment${openShip === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
         <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
         ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
+        ${can('manager') ? `<a class="tile" href="#/billing"><strong>Billing</strong><span>Rates, extra charges, monthly statements</span></a>` : ''}
         ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, users, company info</span></a>` : ''}
       </div>
       <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
@@ -753,6 +757,8 @@
           <div style="margin-top:12px">${pallets.length ? pallets.map(palletRow).join('') : '<p class="muted">No pallets yet.</p>'}</div>
         </div>
 
+        ${!dockMode && can('operator') && rcpt.status !== 'void' ? '<div class="card" id="charges-card"></div>' : ''}
+
         ${dockMode ? `
         <div class="btn-row">
           <button class="btn secondary" id="print-all" ${active.length ? '' : 'disabled'}>Print All Labels</button>
@@ -771,6 +777,7 @@
     const page = $('#rcpt-page');
     wireScanButtons(page);
     const reload = fid => viewReceipt(id, fid, dockMode);
+    wireCharges($('#charges-card', page), { receipt_id: id, owner_id: rcpt.owner_id, warehouse_id: rcpt.warehouse_id });
 
     /* header save */
     $('#hdr-form', page)?.addEventListener('submit', e => {
@@ -1872,6 +1879,8 @@
           <div style="margin-top:12px">${lines.length ? lines.map(lineRow).join('') : '<p class="muted">No pallets yet. Scan a pallet to add it.</p>'}</div>
         </div>
 
+        ${can('operator') && ship.status !== 'void' ? '<div class="card" id="charges-card"></div>' : ''}
+
         <div class="btn-row">
           ${isOpen ? `<button class="btn secondary" id="print-load">Print Load Sheet</button>` : ''}
           <button class="btn dark" id="print-bol" ${lines.length ? '' : 'disabled'}>Print BOL</button>
@@ -1883,6 +1892,7 @@
     const page = $('#ship-page');
     wireScanButtons(page);
     const reload = focus => viewShipment(id, focus);
+    wireCharges($('#charges-card', page), { shipment_id: id, owner_id: ship.owner_id, warehouse_id: ship.warehouse_id });
 
     const hdr = $('#ship-hdr', page);
     if (hdr) {
@@ -2117,6 +2127,351 @@
         toast(`Password set for ${u.full_name}: ${pw}`);
       });
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* BILLING: rates, manual charges, monthly statements                  */
+  /* ------------------------------------------------------------------ */
+  const money = n => Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+  const rateText = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const pad2 = n => String(n).padStart(2, '0');
+  const ymOf = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+  const validYm = v => /^\d{4}-\d{2}$/.test(v || '') ? v : null;
+  function addYm(ym, n) { const [y, m] = ym.split('-').map(Number); return ymOf(new Date(y, m - 1 + n, 1)); }
+  function monthLabel(ym, short = false) {
+    const [y, m] = ym.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString('en-US', short ? { month: 'short' } : { month: 'long', year: 'numeric' });
+  }
+  function todayIso() { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+  // last day of a past month, today for the current month
+  function defaultChargeDate(ym) {
+    if (!ym || ym >= ymOf(new Date())) return todayIso();
+    const [y, m] = ym.split('-').map(Number);
+    return `${ym}-${pad2(new Date(y, m, 0).getDate())}`;
+  }
+  function chargeTypeById(id) { return (S.chargeTypes || []).find(t => t.id === id) || {}; }
+
+  const RATE_GROUPS = [
+    { title: 'Handling', note: 'Most contracts pay in and out together up front: put the whole fee on Inbound and leave Outbound blank.',
+      rows: [['in_pallet', 'Inbound, per pallet'], ['in_unit', 'Inbound, per unit'], ['out_pallet', 'Outbound, per pallet'], ['out_unit', 'Outbound, per unit']] },
+    { title: 'Load fees', rows: [['receipt_fee', 'Per inbound load (receipt)'], ['shipment_fee', 'Per outbound load (shipment)']] },
+    { title: 'Storage', note: 'On arrival bills the month a pallet comes in, whatever the day. On the 1st bills everything still here at 12:00 AM.',
+      rows: [['storage_init_pallet', 'On arrival, per pallet'], ['storage_init_unit', 'On arrival, per unit'],
+             ['storage_recur_pallet', 'On the 1st, per pallet on hand'], ['storage_recur_unit', 'On the 1st, per unit on hand']] },
+    { title: 'Monthly contract', note: 'Fixed every month, whatever is in the building.',
+      rows: [['monthly_sqft', 'Space: rate per sq ft'], ['monthly_flat', 'Flat monthly fee']] }
+  ];
+
+  /* ---- charges card on a receipt or shipment ---- */
+  async function wireCharges(card, ctx) {
+    if (!card) return;
+    const col = ctx.receipt_id ? 'receipt_id' : 'shipment_id';
+    const docId = ctx.receipt_id || ctx.shipment_id;
+    const draw = async () => {
+      const rows = await q(sb.from('manual_charges').select('*').eq(col, docId).order('created_at'));
+      if (!card.isConnected) return;
+      const total = rows.reduce((a, r) => a + Number(r.amount), 0);
+      card.innerHTML = `
+        <div class="row spread"><h2 style="margin:0">Charges</h2>
+          <button class="btn sm secondary" id="add-charge" type="button">Add Charge</button></div>
+        <p class="muted small" style="margin:6px 0 0">Extras for this load: admin, special handling, after hours. Handling and storage are added automatically on the monthly statement.</p>
+        ${rows.length ? `<div style="margin-top:10px">${rows.map(chargeRow).join('')}</div>
+          <div class="row spread" style="margin-top:8px"><strong>Total</strong><strong>${money(total)}</strong></div>` : ''}`;
+      $('#add-charge', card).onclick = () => busy(null, () => chargeForm(ctx, draw));
+      wireChargeRemove(card, rows, draw);
+    };
+    await draw().catch(e => { if (card.isConnected) card.innerHTML = `<div class="notice bad">${esc(friendly(e))}</div>`; });
+  }
+
+  function chargeRow(r) {
+    const ct = chargeTypeById(r.charge_type_id);
+    return `
+      <div class="list-item charge">
+        <div><strong>${esc(ct.name || 'Charge')}</strong>${r.description ? ' &middot; ' + esc(r.description) : ''}
+          <div class="meta">${esc(fmtDate(r.charge_date))} &middot; ${esc(fmtQty(r.qty))} ${esc(ct.unit || '')} &times; ${rateText(r.rate)}${userName(r.created_by) ? ' &middot; ' + esc(userName(r.created_by)) : ''}</div></div>
+        <div class="qty">${money(r.amount)}
+          ${can('manager') ? `<div><button class="btn sm ghost" type="button" data-del-charge="${r.id}">Remove</button></div>` : ''}</div>
+      </div>`;
+  }
+
+  function wireChargeRemove(container, rows, after) {
+    $$('[data-del-charge]', container).forEach(b => b.onclick = async () => {
+      const r = rows.find(x => x.id === b.dataset.delCharge);
+      if (!await askConfirm('Remove charge?', `${esc(chargeTypeById(r.charge_type_id).name || 'Charge')}, ${money(r.amount)}.`, 'Remove', true)) return;
+      busy(null, async () => {
+        await q(sb.from('manual_charges').delete().eq('id', r.id));
+        await after();
+        toast('Charge removed.');
+      });
+    });
+  }
+
+  // ctx: { owner_id, receipt_id?, shipment_id?, warehouse_id?, date? }
+  async function chargeForm(ctx, after) {
+    const types = (S.chargeTypes || []).filter(t => t.active);
+    if (!types.length) throw new Error('No charge types are set up. A manager can add them under Billing > Charge Types.');
+    const rates = await q(sb.from('account_rates').select('charge_type_id, rate').eq('owner_id', ctx.owner_id).eq('basis', 'manual'));
+    const rateFor = id => { const r = rates.find(x => x.charge_type_id === id); return r ? Number(r.rate) : Number(chargeTypeById(id).default_rate || 0); };
+    const body = openModal('Add Charge', `
+      <form id="chg-form" autocomplete="off">
+        <p class="muted small" style="margin-top:0">Account ${esc(ownerById(ctx.owner_id).code || '')}</p>
+        <div class="field"><label for="chg-type">Charge</label>
+          <select id="chg-type">${types.map(t => `<option value="${t.id}">${esc(t.name)} (per ${esc(t.unit)})</option>`).join('')}</select></div>
+        <div class="grid2">
+          <div class="field"><label for="chg-qty">Qty</label><input id="chg-qty" type="number" inputmode="decimal" step="any" min="0.01" value="1" required></div>
+          <div class="field"><label for="chg-rate">Rate ($)</label><input id="chg-rate" type="number" inputmode="decimal" step="any" min="0" required></div>
+        </div>
+        <div class="field"><label for="chg-date">Date</label><input id="chg-date" type="date" value="${esc(ctx.date || todayIso())}" required></div>
+        <div class="field"><label for="chg-desc">Note (prints on the statement)</label><input id="chg-desc" maxlength="120" placeholder="e.g. Sat unload, 2 hrs restack"></div>
+        <p class="muted" id="chg-amt" style="font-weight:700"></p>
+        <button class="btn block" id="chg-save">Add Charge</button>
+      </form>`);
+    const typeSel = $('#chg-type', body), qtyIn = $('#chg-qty', body), rateIn = $('#chg-rate', body);
+    const showAmt = () => { $('#chg-amt', body).textContent = 'Amount: ' + money(Math.round((Number(qtyIn.value) || 0) * (Number(rateIn.value) || 0) * 100) / 100); };
+    const setRate = () => { rateIn.value = rateFor(typeSel.value); showAmt(); };
+    typeSel.onchange = setRate; qtyIn.oninput = showAmt; rateIn.oninput = showAmt;
+    setRate();
+    $('#chg-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#chg-save', body), async () => {
+        const qty = Number(qtyIn.value), rate = Number(rateIn.value);
+        if (!(qty > 0)) throw new Error('Qty must be more than zero.');
+        if (!(rate >= 0)) throw new Error('Enter a rate.');
+        await q(sb.from('manual_charges').insert({
+          owner_id: ctx.owner_id, receipt_id: ctx.receipt_id || null, shipment_id: ctx.shipment_id || null,
+          warehouse_id: ctx.warehouse_id || null, charge_type_id: typeSel.value, qty, rate,
+          charge_date: $('#chg-date', body).value, description: strOrNull($('#chg-desc', body).value)
+        }));
+        closeModal();
+        await after();
+        toast(`Charge added: ${money(Math.round(qty * rate * 100) / 100)}.`);
+      });
+    };
+  }
+
+  /* ---- Billing home: every account for a month ---- */
+  async function viewBilling(ymArg) {
+    if (!can('manager')) { location.hash = '#/'; return; }
+    const mySeq = navSeq;
+    const ym = validYm(ymArg) || validYm(loadPref('billMonth', null)) || addYm(ymOf(new Date()), -1);
+    if (!document.querySelector('#bill-page')) render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.rpc('wms_billing_summary', { p_month: ym + '-01' }));
+    if (mySeq !== navSeq) return;
+    const list = rows.map(r => ({ ...r, o: ownerById(r.owner_id) })).sort((a, b) => (a.o.code || '').localeCompare(b.o.code || ''));
+    const grand = list.reduce((a, r) => a + Number(r.total), 0);
+    render(`
+      <div id="bill-page">
+        <a class="back" href="#/">&larr; Home</a>
+        <h1>Billing</h1>
+        <div class="card accent">
+          <div class="row spread" style="align-items:flex-end">
+            <div class="field" style="margin:0"><label for="bill-month">Month</label><input id="bill-month" type="month" value="${ym}" style="width:auto"></div>
+            <div style="text-align:right"><div class="muted small">All accounts</div><div class="big-money">${money(grand)}</div></div>
+          </div>
+        </div>
+        <div class="list">${list.map(r => `
+          <a class="list-item" href="#/billing/${r.owner_id}/${ym}">
+            <div class="row spread"><span class="title">${esc(r.o.code || '?')} — ${esc(r.o.name || '')}</span><strong>${money(r.total)}</strong></div>
+            <div class="meta">${r.status === 'closed' ? badge('closed') : '<span class="badge open">open</span>'} &middot; ${r.line_count} line${r.line_count === 1 ? '' : 's'}</div>
+          </a>`).join('') || '<p class="muted">No accounts yet. Add them in Setup &gt; Accounts.</p>'}</div>
+        <p class="muted small">Open months are live and change as loads come and go. Close a month after it's billed to freeze it.</p>
+        <div class="btn-row"><button class="btn secondary" id="charge-types" type="button">Charge Types</button></div>
+      </div>`);
+    $('#bill-month').onchange = e => { if (validYm(e.target.value)) { savePref('billMonth', e.target.value); viewBilling(e.target.value); } };
+    $('#charge-types').onclick = () => chargeTypesModal();
+  }
+
+  /* ---- one account's statement for a month ---- */
+  async function viewStatement(ownerId, ymArg) {
+    if (!can('manager')) { location.hash = '#/'; return; }
+    const mySeq = navSeq;
+    const owner = ownerById(ownerId);
+    if (!owner.id) { render(`<div class="card"><h2>Account not found</h2><a class="btn" href="#/billing">Billing</a></div>`); return; }
+    const ym = validYm(ymArg) || addYm(ymOf(new Date()), -1);
+    savePref('billMonth', ym);
+    if (!document.querySelector('#st-page')) render(`<div class="loading">Loading...</div>`);
+    const [st, charges, rates] = await Promise.all([
+      q(sb.rpc('wms_billing_statement', { p_owner_id: ownerId, p_month: ym + '-01' })),
+      q(sb.from('manual_charges').select('*').eq('owner_id', ownerId).gte('charge_date', ym + '-01').lt('charge_date', addYm(ym, 1) + '-01').order('charge_date')),
+      q(sb.from('account_rates').select('id').eq('owner_id', ownerId))
+    ]);
+    if (mySeq !== navSeq) return;
+    const isOpen = st.status === 'open';
+    const lines = st.lines || [];
+    const cats = [...new Set(lines.map(l => l.category))];
+    const showWh = new Set(lines.map(l => l.warehouse_code).filter(Boolean)).size > 1;
+    const lineRow = l => `
+      <div class="list-item st-line">
+        <div>${esc(l.description)}
+          <div class="meta">${esc([showWh && l.warehouse_code, l.ref].filter(Boolean).join(' · '))}${(showWh && l.warehouse_code) || l.ref ? ' &middot; ' : ''}${esc(fmtQty(l.qty))} ${esc(Number(l.qty) === 1 && l.uom === 'pallets' ? 'pallet' : (l.uom || ''))} &times; ${rateText(l.rate)}</div></div>
+        <div class="qty">${money(l.amount)}</div>
+      </div>`;
+    render(`
+      <div id="st-page">
+        <a class="back" href="#/billing">&larr; Billing</a>
+        <div class="row spread"><h1>${esc(owner.code)} &middot; ${esc(monthLabel(ym))}</h1>${isOpen ? '<span class="badge open">open</span>' : badge('closed')}</div>
+        <div class="row" style="gap:8px;margin:-4px 0 12px">
+          <a class="btn sm ghost" href="#/billing/${ownerId}/${addYm(ym, -1)}">&lsaquo; ${esc(monthLabel(addYm(ym, -1), true))}</a>
+          <a class="btn sm ghost" href="#/billing/${ownerId}/${addYm(ym, 1)}">${esc(monthLabel(addYm(ym, 1), true))} &rsaquo;</a>
+          <span class="muted small">Statement ${esc(st.statement_no)}</span>
+        </div>
+        ${!isOpen ? `<div class="notice ok">Closed ${esc(fmtDateTime(st.closed_at))}${st.closed_by ? ' by ' + esc(st.closed_by) : ''}. These numbers are frozen.</div>`
+          : st.month_ended ? `<div class="notice warn">${esc(monthLabel(ym))} is over. Review the charges, then <strong>Close Month</strong> to freeze this statement.</div>`
+          : `<div class="notice">Month in progress. These numbers update as loads come and go.</div>`}
+        ${!rates.length ? `<div class="notice warn">No rates are set for ${esc(owner.code)} yet, so only manual charges show. Tap <strong>Rates</strong> to enter the contract.</div>` : ''}
+        <div class="card">
+          ${cats.length ? cats.map(c => {
+            const rows = lines.filter(l => l.category === c);
+            return `<h2 style="margin:4px 0 6px">${esc(c)}</h2>${rows.map(lineRow).join('')}
+              <div class="row spread small" style="margin:4px 0 12px"><span class="muted">${esc(c)} subtotal</span><strong>${money(rows.reduce((a, l) => a + Number(l.amount), 0))}</strong></div>`;
+          }).join('') : '<p class="muted">No charges for this month.</p>'}
+          <div class="row spread st-total"><strong>Total</strong><strong class="big-money">${money(st.total)}</strong></div>
+        </div>
+        ${charges.length ? `<div class="card"><h2 style="margin-top:0">Manual charges this month</h2><div id="st-charges">${charges.map(chargeRow).join('')}</div></div>` : ''}
+        <div class="btn-row">
+          <button class="btn dark" id="st-print" type="button">Print Statement</button>
+          <button class="btn secondary" id="st-csv" type="button">Export CSV</button>
+          <button class="btn secondary" id="st-detail" type="button">Pallet Detail CSV</button>
+          <button class="btn secondary" id="st-rates" type="button">Rates</button>
+          ${isOpen ? '<button class="btn secondary" id="st-add" type="button">Add Charge</button>' : ''}
+          ${isOpen && st.month_ended ? '<button class="btn" id="st-close" type="button">Close Month</button>' : ''}
+          ${!isOpen && can('admin') ? '<button class="btn danger" id="st-reopen" type="button">Reopen Month</button>' : ''}
+        </div>
+      </div>`);
+    const page = $('#st-page');
+    const reload = () => viewStatement(ownerId, ym);
+    if (isOpen) wireChargeRemove(page, charges, reload);
+    else $$('[data-del-charge]', page).forEach(b => b.remove());
+
+    $('#st-print').onclick = () => WmsPrint.statement(st, owner, S.settings, monthLabel(ym));
+    $('#st-csv').onclick = () => {
+      const n = downloadCsv(`statement-${st.statement_no}.csv`,
+        ['Statement', 'Account', 'Month', 'Status', 'Category', 'Description', 'Warehouse', 'Ref', 'Qty', 'Unit', 'Rate', 'Amount'],
+        lines.map(l => [st.statement_no, owner.code, ym, st.status, l.category, l.description, l.warehouse_code, l.ref, l.qty, l.uom, l.rate, l.amount]));
+      toast(`Exported ${n} line${n === 1 ? '' : 's'}.`);
+    };
+    $('#st-detail').onclick = () => busy($('#st-detail'), async () => {
+      const rows = await q(sb.rpc('wms_billing_detail', { p_owner_id: ownerId, p_month: ym + '-01' }));
+      const n = downloadCsv(`billing-detail-${owner.code}-${ym}.csv`,
+        ['Event', 'Date', 'Warehouse', 'Ref', 'WMS Pallet ID', lbl.cust(), 'SKU', lbl.lot(), 'Qty', 'UOM'],
+        rows.map(r => [r.event, fmtDateTime(r.event_at), r.warehouse_code, r.ref, r.lp_id, r.customer_pallet_id, r.sku, r.lot_number, r.qty, r.uom]));
+      toast(`Exported ${n} pallet row${n === 1 ? '' : 's'}.`);
+    });
+    $('#st-rates').onclick = () => busy(null, () => ratesModal(owner, reload));
+    $('#st-add')?.addEventListener('click', () => busy(null, () => chargeForm({ owner_id: ownerId, date: defaultChargeDate(ym) }, reload)));
+    $('#st-close')?.addEventListener('click', async () => {
+      if (!await askConfirm(`Close ${monthLabel(ym)}?`,
+        `This freezes statement ${esc(st.statement_no)} at ${money(st.total)}. Charges for ${esc(monthLabel(ym))} can't be added or removed until an admin reopens it.`, 'Close Month')) return;
+      busy($('#st-close'), async () => {
+        await q(sb.rpc('wms_close_billing_period', { p_owner_id: ownerId, p_month: ym + '-01' }));
+        await reload();
+        toast(`${monthLabel(ym)} closed for ${owner.code}.`);
+      });
+    });
+    $('#st-reopen')?.addEventListener('click', async () => {
+      if (!await askConfirm(`Reopen ${monthLabel(ym)}?`,
+        'The statement goes back to live numbers, which may differ from what was billed. Close it again when done.', 'Reopen', true)) return;
+      busy($('#st-reopen'), async () => {
+        await q(sb.rpc('wms_reopen_billing_period', { p_owner_id: ownerId, p_month: ym + '-01' }));
+        await reload();
+        toast(`${monthLabel(ym)} reopened.`);
+      });
+    });
+  }
+
+  /* ---- an account's contract rates ---- */
+  async function ratesModal(owner, after) {
+    const existing = await q(sb.from('account_rates').select('*').eq('owner_id', owner.id));
+    const find = (basis, ct = null) => existing.find(r => r.basis === basis && (r.charge_type_id || null) === ct);
+    const val = r => r ? String(Number(r.rate)) : '';
+    const types = (S.chargeTypes || []).filter(t => t.active);
+    const sq = find('monthly_sqft');
+    const body = openModal(`Rates: ${owner.code}`, `
+      <form id="rates-form" autocomplete="off">
+        <p class="muted small" style="margin-top:0">Dollars per unit. Leave a box blank if the contract doesn't charge it. Changes apply to open months; closed months keep what was billed.</p>
+        ${RATE_GROUPS.map(g => `
+          <h2 style="margin:14px 0 4px">${esc(g.title)}</h2>
+          ${g.note ? `<p class="muted small" style="margin:0 0 6px">${esc(g.note)}</p>` : ''}
+          <div class="grid2">${g.rows.map(([b, label]) => `
+            <div class="field"><label for="r-${b}">${esc(label)}</label>
+              <input id="r-${b}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find(b)))}" placeholder="not billed"></div>
+            ${b === 'monthly_sqft' ? `<div class="field"><label for="r-sqft">Contract sq ft</label>
+              <input id="r-sqft" type="number" inputmode="numeric" step="any" min="1" value="${esc(sq?.qty ? String(Number(sq.qty)) : '')}"></div>` : ''}`).join('')}
+          </div>`).join('')}
+        <h2 style="margin:14px 0 4px">Accessorial prices</h2>
+        <p class="muted small" style="margin:0 0 6px">This account's price for each extra charge. Blank uses the standard rate shown.</p>
+        <div class="grid2">${types.map(t => `
+          <div class="field"><label for="r-ct-${t.id}">${esc(t.name)} (per ${esc(t.unit)})</label>
+            <input id="r-ct-${t.id}" type="number" inputmode="decimal" step="any" min="0" value="${esc(val(find('manual', t.id)))}" placeholder="${esc(rateText(t.default_rate))}"></div>`).join('')}
+        </div>
+        <button class="btn block" id="rates-save" style="margin-top:10px">Save Rates</button>
+      </form>`);
+    $('#rates-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#rates-save', body), async () => {
+        const want = [];
+        RATE_GROUPS.forEach(g => g.rows.forEach(([b]) => want.push({ basis: b, charge_type_id: null, rate: numOrNull($('#r-' + b, body).value) })));
+        types.forEach(t => want.push({ basis: 'manual', charge_type_id: t.id, rate: numOrNull($('#r-ct-' + t.id, body).value) }));
+        const sqft = numOrNull($('#r-sqft', body).value);
+        for (const w of want) if (w.rate !== null && !(w.rate >= 0)) throw new Error('Rates must be zero or more.');
+        if (want.find(w => w.basis === 'monthly_sqft').rate !== null && !(sqft > 0)) throw new Error('Enter the contract square feet for the space rate.');
+        for (const w of want) {
+          const cur = find(w.basis, w.charge_type_id);
+          const qty = w.basis === 'monthly_sqft' ? sqft : null;
+          if (w.rate === null) { if (cur) await q(sb.from('account_rates').delete().eq('id', cur.id)); continue; }
+          if (cur && Number(cur.rate) === w.rate && (cur.qty === null ? null : Number(cur.qty)) === qty) continue;
+          if (cur) await q(sb.from('account_rates').update({ rate: w.rate, qty }).eq('id', cur.id));
+          else await q(sb.from('account_rates').insert({ owner_id: owner.id, basis: w.basis, charge_type_id: w.charge_type_id, rate: w.rate, qty }));
+        }
+        closeModal();
+        await after();
+        toast(`Rates saved for ${owner.code}.`);
+      });
+    };
+  }
+
+  /* ---- accessorial charge types (shared by all accounts) ---- */
+  function chargeTypesModal() {
+    const rows = S.chargeTypes || [];
+    const body = openModal('Charge Types', `
+      <p class="muted small" style="margin-top:0">Extra charges office staff can add to a receipt, shipment or account. The standard rate is used unless an account has its own price under Rates.</p>
+      <div class="list">${rows.map(t => `
+        <a class="list-item" href="#" data-ct="${t.id}" style="${t.active ? '' : 'opacity:.55'}">
+          <div class="row spread"><span class="title">${esc(t.name)}</span><span>${rateText(t.default_rate)} / ${esc(t.unit)}</span></div>
+          <div class="meta">${esc(t.code)}${t.active ? '' : ' &middot; inactive'}</div></a>`).join('')}</div>
+      <button class="btn block" id="add-ct" type="button" style="margin-top:10px">Add Charge Type</button>`);
+    $('#add-ct', body).onclick = () => chargeTypeForm(null);
+    $$('[data-ct]', body).forEach(a => a.onclick = e => { e.preventDefault(); chargeTypeForm(rows.find(r => r.id === a.dataset.ct)); });
+  }
+
+  function chargeTypeForm(t) {
+    const r = t || { unit: 'each', default_rate: 0, active: true, sort_order: (S.chargeTypes || []).length + 1 };
+    const body = openModal(t ? `Edit ${t.code}` : 'Add Charge Type', `
+      <form id="ct-form" autocomplete="off">
+        <div class="grid2">
+          <div class="field"><label for="ct-code">Code</label><input id="ct-code" value="${esc(r.code || '')}" required maxlength="12" autocapitalize="characters" placeholder="LUMPER"></div>
+          <div class="field"><label for="ct-name">Name</label><input id="ct-name" value="${esc(r.name || '')}" required maxlength="60" placeholder="Lumper service"></div>
+          <div class="field"><label for="ct-unit">Unit</label><input id="ct-unit" value="${esc(r.unit || 'each')}" required maxlength="20" placeholder="each, hour, pallet"></div>
+          <div class="field"><label for="ct-rate">Standard rate ($)</label><input id="ct-rate" type="number" inputmode="decimal" step="any" min="0" value="${esc(String(Number(r.default_rate || 0)))}" required></div>
+        </div>
+        <div class="field"><label class="check"><input type="checkbox" id="ct-active" ${r.active ? 'checked' : ''}> Active</label></div>
+        <button class="btn block" id="ct-save">${t ? 'Save' : 'Add Charge Type'}</button>
+      </form>`);
+    $('#ct-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#ct-save', body), async () => {
+        const row = {
+          code: $('#ct-code', body).value.trim().toUpperCase(), name: $('#ct-name', body).value.trim(),
+          unit: $('#ct-unit', body).value.trim().toLowerCase(), default_rate: Number($('#ct-rate', body).value) || 0,
+          active: $('#ct-active', body).checked
+        };
+        if (t) await q(sb.from('charge_types').update(row).eq('id', t.id));
+        else await q(sb.from('charge_types').insert({ ...row, sort_order: r.sort_order }));
+        S.chargeTypes = await q(sb.from('charge_types').select('*').order('sort_order').order('name'));
+        toast(`${row.code} saved.`);
+        chargeTypesModal();
+      });
+    };
   }
 
   /* ------------------------------------------------------------------ */

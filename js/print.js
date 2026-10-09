@@ -443,5 +443,70 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.5in;');
   }
 
-  return { labels, receipt, bol, loadSheet, unloadSheet };
+  /* Monthly billing statement (letter). st: wms_billing_statement() result */
+  function statement(st, owner, settings, monthLabel) {
+    const s = settings || {};
+    const company = esc((s.company_name || '').replace(/_/g, ' '));
+    const addr = [s.address_line1, s.address_line2, [s.city, s.state].filter(Boolean).join(', ') + (s.zip ? ' ' + s.zip : '')]
+      .filter(x => x && x.trim()).map(esc).join('<br>');
+    const money = n => Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+    const rate = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    const lines = st.lines || [];
+    const showWh = lines.some(l => l.warehouse_code) && new Set(lines.map(l => l.warehouse_code).filter(Boolean)).size > 1;
+    const cats = [...new Set(lines.map(l => l.category))];
+    const billTo = [owner.name, owner.contact_name ? 'Attn: ' + owner.contact_name : '', owner.billing_address]
+      .filter(Boolean).map(x => esc(x).replace(/\n/g, '<br>')).join('<br>');
+    const html = `
+      <style>
+        .st { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 10pt; }
+        .st-head { display: flex; justify-content: space-between; align-items: flex-start;
+                   border-bottom: 3pt solid #C41230; padding-bottom: 8pt; margin-bottom: 10pt; }
+        .st-co { font-size: 16pt; font-weight: 800; }
+        .st-title { text-align: right; }
+        .st-title h1 { font-size: 18pt; margin: 0; }
+        .st-no { font-family: "Courier New", monospace; font-size: 12pt; font-weight: 800; }
+        .st-info { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 4pt 16pt; margin-bottom: 12pt; }
+        .st-info div span { display: block; font-size: 8pt; font-weight: 700; color: #444; text-transform: uppercase; }
+        .st h2 { font-size: 11.5pt; margin: 12pt 0 3pt; border-bottom: 1pt solid #000; }
+        .st table { width: 100%; border-collapse: collapse; }
+        .st th, .st td { border-bottom: .5pt solid #999; padding: 3pt 4pt; text-align: left; vertical-align: top; }
+        .st th { font-size: 8pt; text-transform: uppercase; background: #eee; }
+        .st .num { text-align: right; white-space: nowrap; }
+        .st .sub td { font-weight: 700; border-bottom: 1pt solid #000; }
+        .st-total { margin-top: 12pt; display: flex; justify-content: flex-end; }
+        .st-total div { border-top: 2pt solid #000; padding-top: 4pt; font-size: 14pt; font-weight: 800; min-width: 2.6in; display: flex; justify-content: space-between; }
+        .st-foot { margin-top: 18pt; font-size: 8pt; color: #555; }
+      </style>
+      <div class="st">
+        <div class="st-head">
+          <div><div class="st-co">${company}</div><div>${addr}</div>${s.phone ? `<div>${esc(s.phone)}</div>` : ''}</div>
+          <div class="st-title"><h1>Warehouse Statement</h1><div class="st-no">${esc(st.statement_no)}</div>
+            <div>${esc(monthLabel)}</div>
+            ${st.status === 'open' ? '<div style="color:#b3261e;font-weight:800">PRELIMINARY</div>' : ''}</div>
+        </div>
+        <div class="st-info">
+          <div><span>Bill to</span>${billTo}</div>
+          <div><span>Account</span>${esc(owner.code)}</div>
+          <div><span>Period</span>${esc(monthLabel)}</div>
+        </div>
+        ${lines.length ? cats.map(c => {
+          const rows = lines.filter(l => l.category === c);
+          const sub = rows.reduce((a, l) => a + Number(l.amount), 0);
+          return `<h2>${esc(c)}</h2>
+          <table style="table-layout:fixed">
+            <colgroup><col style="width:${showWh ? 36 : 44}%">${showWh ? '<col style="width:8%">' : ''}<col style="width:14%"><col style="width:10%"><col style="width:9%"><col style="width:11%"><col style="width:12%"></colgroup>
+            <thead><tr><th>Description</th>${showWh ? '<th>Whse</th>' : ''}<th>Ref</th><th class="num">Qty</th><th>Unit</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+            <tbody>${rows.map(l => `<tr><td>${esc(l.description)}</td>${showWh ? `<td>${esc(l.warehouse_code || '')}</td>` : ''}
+              <td>${esc(l.ref || '')}</td><td class="num">${esc(fmtQty(l.qty))}</td><td>${esc(Number(l.qty) === 1 && l.uom === 'pallets' ? 'pallet' : (l.uom || ''))}</td>
+              <td class="num">${rate(l.rate)}</td><td class="num">${money(l.amount)}</td></tr>`).join('')}
+              <tr class="sub"><td colspan="${showWh ? 6 : 5}">${esc(c)} subtotal</td><td class="num">${money(sub)}</td></tr></tbody>
+          </table>`;
+        }).join('') : '<p>No charges this period.</p>'}
+        <div class="st-total"><div><span>Total</span><span>${money(st.total)}</span></div></div>
+        <div class="st-foot">Printed ${esc(fmtDateTime(new Date()))}</div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.5in;');
+  }
+
+  return { labels, receipt, bol, loadSheet, unloadSheet, statement };
 })();
