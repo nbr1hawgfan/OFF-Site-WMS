@@ -3,7 +3,20 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.6.0 includes:**
+**v0.7.0 adds:**
+- **Multiple warehouses** (Setup > Warehouses): WHSE1, WHSE2, and so on. Each
+  building has its own locations, receipts, shipments, schedule and paperwork
+  address. Switch buildings from the selector in the red header.
+- **Customer accounts** (Setup > Accounts): whose product it is. Every item,
+  receipt and shipment belongs to one account. The same SKU can exist under two
+  accounts.
+- **Transfers:** moving a pallet to a location in the other building is logged
+  as a transfer. Dock Mode > Move has a "To warehouse" picker.
+- **Guards:** a load refuses pallets from another account or another building
+  (WRONG PALLET).
+- **Reports** gain Warehouse and Account columns and cover all buildings.
+
+**Earlier releases include:**
 - **Users screen** (Setup > Users): admins and managers create logins (simple
   usernames for dock staff), change roles, deactivate, and reset passwords.
 - **Reports:** Excel-ready exports of inventory, received, shipped, and all
@@ -20,11 +33,12 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Receiving:** receipts, pallets, 4x6 labels, printed receipt.
 - **Shipping:** scan or pick pallets, partial pallets, ship, BOL.
 - **Inventory lookup:** scan or search, move, adjust, hold.
-- **Setup:** items, locations, customers & vendors, company info, pallet
-  identifiers.
+- **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
+  users, company info, pallet identifiers.
 
-> **Database:** migrations 001–007 and the `admin-users` Edge Function are
-> deployed to Offsite WMS.
+> **Database:** migrations 001–008 and the `admin-users` Edge Function.
+> **v0.7 needs migration 008** (`supabase/migrations/008_warehouses_accounts.sql`)
+> run before the new app files go live.
 
 ## Files
 
@@ -36,7 +50,7 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 | `js/print.js` | Pallet labels and receiving receipt |
 | `css/app.css` | Styles (red header, black accents) |
 | `sw.js` | Service worker. **Bump `CACHE` on every release.** |
-| `supabase/migrations/` | Database schema, already applied to Offsite WMS |
+| `supabase/migrations/` | Database schema (run in order in the SQL Editor) |
 
 ## Deploy (GitHub Pages)
 
@@ -77,6 +91,29 @@ server-side and checks the caller on every request. The rules live in
 | operator | Office: create and edit receipts and shipments, order lines, receive, load, move, close receipts, ship |
 | manager | + setup (items, locations), adjust qty, hold/release, reopen/void receipts, void any unshipped pallet |
 | admin | + company info |
+
+## Warehouses and accounts
+
+**Warehouses** (Setup > Warehouses, managers):
+- Existing data was moved into **WHSE1 — Main Warehouse** (address copied from
+  Company).
+- **Add Warehouse** creates the building with DOCK, FLOOR and HOLD. Add its
+  racks under Setup > Locations while that warehouse is selected. Location
+  codes only need to be unique within a building.
+- **The header selector** sets which building you're working in. Each phone
+  remembers its last choice, and it follows the user to other devices.
+- **Lookup** shows the current building, with an **All warehouses** checkbox.
+- **Paperwork** (BOL, receipt, labels, sheets) prints that building's address
+  as the ship-from when it has one, and the warehouse code on labels.
+- Any lift driver can work in any building by switching the header.
+
+**Accounts** (Setup > Accounts, managers):
+- Existing items, receipts and shipments were put under **MAIN — Main
+  Account**. Rename it to the real customer.
+- With more than one account, new items, receipts and shipments ask which
+  account. Receipts only list that account's items.
+- The account and warehouse lock once a receipt has pallets or a shipment has
+  pallets or order lines.
 
 ## Pallet identifiers
 
@@ -182,9 +219,9 @@ Office users can open Dock Mode too, from its tile on the home screen.
 **Voiding** a shipment (managers) releases the pallets if it's open, or puts
 everything back into inventory if it already shipped.
 
-## Customers & vendors
+## Ship-to & vendors
 
-**Setup > Customers** stores vendors (ship-from) and customers (ship-to). Saved
+**Setup > Ship-To** stores vendors (ship-from) and customers (ship-to). Saved
 vendors, and any vendor names typed on past receipts, are suggested on new
 receipts. Customers will fill in the ship-to on shipments and BOLs.
 
@@ -217,6 +254,6 @@ Useful queries:
 
 ```sql
 select * from v_inventory_by_lot order by sku, lot_number;   -- on hand by item/lot
-select * from v_inventory where location = 'DOCK';            -- pallet level
+select * from v_inventory where warehouse_code = 'WHSE2';     -- pallet level, one building
 select * from v_transactions order by id desc limit 100;      -- recent activity
 ```

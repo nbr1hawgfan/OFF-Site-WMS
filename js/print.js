@@ -81,7 +81,7 @@ const WmsPrint = (() => {
         ${(p.production_date || p.expiration_date) ? `<div class="lbl-dates">
             ${p.production_date ? `Prod: ${esc(fmtDate(p.production_date))}` : ''}
             ${p.expiration_date ? `&nbsp;&nbsp;Exp: ${esc(fmtDate(p.expiration_date))}` : ''}</div>` : ''}
-        <div class="lbl-foot">Receipt ${esc(p.receipt_no || '')}</div>
+        <div class="lbl-foot">Receipt ${esc(p.receipt_no || '')}${p.owner_code ? ' &middot; ' + esc(p.owner_code) : ''}${settings?.warehouse_code ? ' &middot; ' + esc(settings.warehouse_code) : ''}</div>
       </section>`;
     };
 
@@ -119,7 +119,7 @@ const WmsPrint = (() => {
   }
 
   /* receipt: header row; pallets: active pallets with sku/description/uom */
-  function receipt(rcpt, pallets, settings) {
+  function receipt(rcpt, pallets, settings, owner) {
     const s = settings || {};
     const company = esc((s.company_name || '').replace(/_/g, ' '));
     const addr = [s.address_line1, s.address_line2, [s.city, s.state].filter(Boolean).join(', ') + (s.zip ? ' ' + s.zip : '')]
@@ -170,6 +170,7 @@ const WmsPrint = (() => {
             ${rcpt.status === 'void' ? '<div style="color:#b3261e;font-weight:800">VOID</div>' : ''}</div>
         </div>
         <div class="rc-info">
+          <div><span>Customer account</span>${esc(owner ? owner.code + ' — ' + owner.name : '')}</div>
           <div><span>Received</span>${esc(fmtDateTime(rcpt.received_at))}</div>
           <div><span>From / Vendor</span>${esc(rcpt.vendor_name || '')}</div>
           <div><span>PO #</span>${esc(rcpt.po_number || '')}</div>
@@ -206,7 +207,7 @@ const WmsPrint = (() => {
   }
 
   /* Straight bill of lading (letter). lines: v_shipment_detail rows */
-  function bol(ship, lines, settings) {
+  function bol(ship, lines, settings, owner) {
     const s = settings || {};
     const tare = Number(s.pallet_tare_lbs || 0);
     const company = esc((s.company_name || '').replace(/_/g, ' '));
@@ -302,7 +303,7 @@ const WmsPrint = (() => {
         <table class="sec">
           <thead><tr><th>Customer Order #</th><th class="num"># Pkgs</th><th class="num">Weight (lbs)</th><th class="center">Pallet/Slip</th><th>Additional Shipper Info</th></tr></thead>
           <tbody><tr><td>${esc(ship.customer_order_no || '')}</td><td class="num">${esc(totQty)}</td><td class="num">${esc(wt(totWeight))}</td>
-            <td class="center">${totHU ? 'Y' : 'N'}</td><td>${ship.po_number ? 'PO ' + esc(ship.po_number) : ''}</td></tr></tbody>
+            <td class="center">${totHU ? 'Y' : 'N'}</td><td>${esc([ship.po_number && 'PO ' + ship.po_number, owner && 'Acct ' + owner.code].filter(Boolean).join(' · '))}</td></tr></tbody>
         </table>
 
         <table class="sec">
@@ -377,7 +378,7 @@ const WmsPrint = (() => {
   };
 
   /* Load sheet: what the lift driver takes to the dock. orders: v_order_progress rows */
-  function loadSheet(ship, orders, settings) {
+  function loadSheet(ship, orders, settings, owner) {
     const s = settings || {};
     const lotLbl = lotLabel(s).split(' /')[0];
     const html = sheetCss + `
@@ -387,6 +388,7 @@ const WmsPrint = (() => {
           <div><div class="code">${esc(ship.shipment_no)}</div><svg class="bc bc-big" data-value="${esc(ship.shipment_no)}" data-h="80"></svg></div>
         </div>
         <div class="who">${esc(ship.ship_to_name || '')}</div>
+        ${owner || s.warehouse_code ? `<div style="margin:-4pt 0 8pt">${esc([owner && 'Account ' + owner.code + ' — ' + owner.name, s.warehouse_code && 'Ship from ' + s.warehouse_code].filter(Boolean).join(' · '))}</div>` : ''}
         <div class="grid">
           <div><span>Ship date</span>${esc(fmtDate(ship.ship_date))}</div>
           <div><span>Appointment</span>${esc(timeStr(ship.appt_time) || '-')}</div>
@@ -411,7 +413,7 @@ const WmsPrint = (() => {
   }
 
   /* Unload sheet: for scheduled inbound trucks */
-  function unloadSheet(rcpt, settings) {
+  function unloadSheet(rcpt, settings, owner) {
     const s = settings || {};
     const lotLbl = lotLabel(s).split(' /')[0];
     const html = sheetCss + `
@@ -421,6 +423,7 @@ const WmsPrint = (() => {
           <div><div class="code">${esc(rcpt.receipt_no)}</div><svg class="bc bc-big" data-value="${esc(rcpt.receipt_no)}" data-h="80"></svg></div>
         </div>
         <div class="who">${esc(rcpt.vendor_name || 'Inbound')}</div>
+        ${owner || s.warehouse_code ? `<div style="margin:-4pt 0 8pt">${esc([owner && 'Account ' + owner.code + ' — ' + owner.name, s.warehouse_code && 'Warehouse ' + s.warehouse_code].filter(Boolean).join(' · '))}</div>` : ''}
         <div class="grid">
           <div><span>Expected</span>${esc(rcpt.expected_at ? fmtDateTime(rcpt.expected_at) : '-')}</div>
           <div><span>Door</span>${esc(rcpt.dock_door || '-')}</div>
