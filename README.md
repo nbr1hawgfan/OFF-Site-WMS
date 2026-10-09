@@ -123,9 +123,8 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–013 and the `admin-users` Edge Function.
-> **v1.2 needs migration 013** (`supabase/migrations/013_subcustomers.sql`) run
-> before the new app files go live.
+> **Database:** migrations 001–013 and the `admin-users` Edge Function, all
+> applied to Offsite WMS.
 
 ## Files
 
