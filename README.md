@@ -3,7 +3,19 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v0.8.0 adds billing:**
+**v0.9.0 adds a dashboard and desktop layout:**
+- **Dashboard home:**
+  - Headline numbers: pallets on hand, SKUs, received/shipped in the last 30
+    days, open loads, today's trucks, and billing month-to-date (managers).
+  - Charts: a 30-day in-vs-out line, pallets by account, and inventory age.
+  - Tables: by account and top items.
+  - Filters: one account, and all warehouses. Click an account row to focus on
+    it.
+- **Desktop layout:** on screens 1100px and wider, office users get a left menu,
+  full-width pages, and receipts/shipments as tables (click a row to open it).
+  Phones and Dock Mode keep the big-button layout.
+
+**v0.8.0 added billing:**
 - **Rates per customer account:** handling in/out per pallet or unit, per-load
   fees, storage on arrival and again on the 1st, contract square footage, a flat
   monthly fee, and the account's own price for each extra charge.

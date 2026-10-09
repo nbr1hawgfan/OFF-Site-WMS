@@ -324,10 +324,34 @@
   // has moved on check this and quietly stop instead of drawing over the new page
   let navSeq = 0;
 
+  /* desktop: left menu for office users (phones and Dock Mode keep the simple layout) */
+  function setShell(a = '') {
+    const office = !!(S.session && S.profile?.active && !isLift() && !recoveryMode && a !== 'dock');
+    document.body.classList.toggle('office', office);
+    document.documentElement.style.setProperty('--hdr', ($('.app-header')?.offsetHeight || 62) + 'px');
+    const nav = $('#sidenav');
+    if (!office) { nav.innerHTML = ''; return; }
+    const items = [
+      ['', 'Dashboard', true, []], ['schedule', 'Schedule', true, []], ['receipts', 'Receiving', true, ['receipt']],
+      ['shipments', 'Shipping', true, ['shipment']], ['lookup', 'Inventory', true, []], ['reports', 'Reports', true, []],
+      ['billing', 'Billing', can('manager'), []], ['setup', 'Setup', can('manager'), []], ['dock', 'Dock Mode', can('operator'), []]
+    ];
+    nav.innerHTML = items.filter(n => n[2]).map(([k, label, , alias]) =>
+      `<a href="#/${k}" class="${a === k || alias.includes(a) ? 'active' : ''}">${label}</a>`).join('')
+      + `<div class="nav-foot">${esc(S.profile.full_name)}<br>${esc(S.profile.role)} &middot; v${esc(cfg.APP_VERSION)}</div>`;
+  }
+  // table rows that open a record when clicked anywhere
+  function wireRowLinks(root = document) {
+    $$('tr[data-href]', root).forEach(tr => tr.addEventListener('click', e => { if (!e.target.closest('a,button')) location.hash = tr.dataset.href; }));
+  }
+  let resizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (document.getElementById('dash') && S.dashResize) S.dashResize(); }, 150); });
+
   async function route() {
     const path = location.hash.replace(/^#\/?/, '');
     const [a, b, c] = path.split('/');
     navSeq++;
+    setShell(a);
     if (!$('#modal').hidden) closeModal();
     window.scrollTo(0, 0);
     try {
@@ -446,36 +470,320 @@
   /* ------------------------------------------------------------------ */
   /* home                                                                */
   /* ------------------------------------------------------------------ */
+  // Supabase returns at most 1,000 rows per request; page through bigger sets
+  async function fetchAll(build, pageSize = 1000) {
+    const out = [];
+    for (let from = 0; from < 50000; from += pageSize) {
+      const rows = await q(build().range(from, from + pageSize - 1));
+      out.push(...rows);
+      if (rows.length < pageSize) break;
+    }
+    return out;
+  }
+  const dayKey = d => { const x = new Date(d); return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`; };
+  const daysOld = d => Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 86400000));
+
+  async function loadDashboard(allWh) {
+    const wh = q => allWh ? q : q.eq('warehouse_id', S.whId);
+    const since = new Date(); since.setHours(0, 0, 0, 0); since.setDate(since.getDate() - 29);
+    const [inv, rcv, shipped, openR, openS, bill] = await Promise.all([
+      fetchAll(() => wh(sb.from('v_inventory').select('pallet_id, lp_id, item_id, sku, description, uom, qty_on_hand, status, received_at, warehouse_id, owner_id')).order('pallet_id')),
+      fetchAll(() => sb.from('v_transactions').select('id, created_at, txn_type, lp_id, to_warehouse, owner_code')
+        .in('txn_type', ['RECEIVE', 'VOID_RECEIVE']).gte('created_at', since.toISOString()).order('id')),
+      fetchAll(() => wh(sb.from('shipments').select('id, shipped_at, owner_id, warehouse_id, shipment_lines(count)'))
+        .eq('status', 'shipped').gte('shipped_at', since.toISOString()).order('shipped_at')),
+      q(wh(sb.from('receipts').select('id, owner_id, expected_at, received_at, unloaded_at, pallets(count)')).eq('status', 'open')),
+      q(wh(sb.from('shipments').select('id, owner_id, ship_date, loaded_at')).eq('status', 'open')),
+      can('manager') && !isLift() ? q(sb.rpc('wms_billing_summary', { p_month: ymOf(new Date()) + '-01' })).catch(() => null) : Promise.resolve(null)
+    ]);
+    // received pallets, minus any later voided
+    const voided = new Set(rcv.filter(t => t.txn_type === 'VOID_RECEIVE').map(t => t.lp_id));
+    const whCode = whById(S.whId).code;
+    const ownerByCode = Object.fromEntries((S.owners || []).map(o => [o.code, o.id]));
+    const received = rcv.filter(t => t.txn_type === 'RECEIVE' && !voided.has(t.lp_id) && (allWh || t.to_warehouse === whCode))
+      .map(t => ({ at: t.created_at, owner_id: ownerByCode[t.owner_code] }));
+    return { inv, received, shipped, openR, openS, bill, since };
+  }
+
   async function viewHome() {
     const mySeq = navSeq;
-    render(`<div class="loading">Loading...</div>`);
-    const countOpen = table => q(sb.from(table).select('id', { count: 'exact', head: true }).eq('status', 'open').eq('warehouse_id', S.whId)
-      .then(r => ({ data: r.count, error: r.error })));
-    const [openCount, onHand, openShip] = await Promise.all([
-      countOpen('receipts'),
-      q(sb.from('v_inventory_by_lot').select('pallets').eq('warehouse_id', S.whId)),
-      countOpen('shipments')
-    ]);
+    const allWh = multiWh() && loadPref('dashAllWh', false);
+    let acct = loadPref('dashOwner', '');
+    if (acct && !ownerById(acct).id) acct = '';
+    const frame = $('#dash');
+    if (frame) frame.classList.add('refreshing'); else render(`<div class="loading">Loading...</div>`);
+    const D = await loadDashboard(allWh);
     if (mySeq !== navSeq) return;
-    const pallets = onHand.reduce((a, r) => a + Number(r.pallets), 0);
+
+    const mine = r => !acct || r.owner_id === acct;
+    const inv = D.inv.filter(mine), received = D.received.filter(mine), shipped = D.shipped.filter(mine);
+    const openR = D.openR.filter(mine), openS = D.openS.filter(mine);
+    const today = todayIso(), monthStart = ymOf(new Date()) + '-01';
+    const shipPallets = s => s.shipment_lines?.[0]?.count ?? 0;
+    const inToday = openR.filter(r => r.expected_at && dayKey(r.expected_at) === today).length;
+    const outToday = openS.filter(s => s.ship_date === today).length;
+    const recvMonth = received.filter(r => dayKey(r.at) >= monthStart).length;
+    const shipMonth = shipped.filter(s => dayKey(s.shipped_at) >= monthStart).reduce((a, s) => a + shipPallets(s), 0);
+    const ship30 = shipped.reduce((a, s) => a + shipPallets(s), 0);
+    const onHold = inv.filter(p => p.status === 'hold').length;
+    const skus = new Set(inv.map(p => p.item_id)).size;
+    const billRows = (D.bill || []).filter(mine);
+    const billMtd = billRows.reduce((a, r) => a + Number(r.total), 0);
+    const avgAge = inv.length ? Math.round(inv.reduce((a, p) => a + daysOld(p.received_at), 0) / inv.length) : 0;
+
+    // per-account roll-up (table)
+    const accts = activeOwners().filter(o => !acct || o.id === acct).map(o => {
+      const p = inv.filter(x => x.owner_id === o.id);
+      const uoms = [...new Set(p.map(x => x.uom))];
+      return {
+        o, pallets: p.length, hold: p.filter(x => x.status === 'hold').length, skus: new Set(p.map(x => x.item_id)).size,
+        qty: uoms.length === 1 ? `${fmtQty(p.reduce((a, x) => a + Number(x.qty_on_hand), 0))} ${uoms[0]}` : (p.length ? 'mixed units' : '-'),
+        oldest: p.length ? Math.max(...p.map(x => daysOld(x.received_at))) : null,
+        in30: received.filter(r => r.owner_id === o.id).length,
+        out30: shipped.filter(s => s.owner_id === o.id).reduce((a, s) => a + shipPallets(s), 0),
+        bill: D.bill ? Number((D.bill.find(r => r.owner_id === o.id) || {}).total || 0) : null
+      };
+    }).sort((a, b) => b.pallets - a.pallets || a.o.code.localeCompare(b.o.code));
+
+    // top items
+    const byItem = {};
+    for (const p of inv) {
+      const k = p.item_id;
+      byItem[k] = byItem[k] || { sku: p.sku, description: p.description, uom: p.uom, owner_id: p.owner_id, pallets: 0, qty: 0, oldest: 0 };
+      byItem[k].pallets++; byItem[k].qty += Number(p.qty_on_hand); byItem[k].oldest = Math.max(byItem[k].oldest, daysOld(p.received_at));
+    }
+    const topItems = Object.values(byItem).sort((a, b) => b.pallets - a.pallets || b.qty - a.qty).slice(0, 10);
+
+    // 30-day series
+    const days = [];
+    for (let i = 0; i < 30; i++) { const d = new Date(D.since); d.setDate(d.getDate() + i); days.push(dayKey(d)); }
+    const inByDay = Object.fromEntries(days.map(d => [d, 0])), outByDay = Object.fromEntries(days.map(d => [d, 0]));
+    received.forEach(r => { const k = dayKey(r.at); if (k in inByDay) inByDay[k]++; });
+    shipped.forEach(s => { const k = dayKey(s.shipped_at); if (k in outByDay) outByDay[k] += shipPallets(s); });
+
+    // aging buckets
+    const buckets = [['0-30 days', 0, 30], ['31-60', 31, 60], ['61-90', 61, 90], ['91-180', 91, 180], ['181+', 181, Infinity]]
+      .map(([label, lo, hi]) => ({ label, value: inv.filter(p => { const a = daysOld(p.received_at); return a >= lo && a <= hi; }).length }));
+
+    const scopeTxt = `${allWh ? 'All warehouses' : esc(whById(S.whId).code || '')}${acct ? ' &middot; ' + esc(ownerById(acct).code) : ''}`;
+    const kpi = (label, value, sub, href) => `
+      <${href ? `a href="${href}"` : 'div'} class="kpi">
+        <div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ''}
+      </${href ? 'a' : 'div'}>`;
+    const showBill = D.bill !== null;
+
     render(`
-      <h1>${esc(companyName())}${multiWh() ? ` <span class="wh-tag">${esc(whById(S.whId).code)}</span>` : ''}</h1>
-      ${multiWh() ? `<p class="muted" style="margin-top:-8px">${esc(whById(S.whId).name || '')}. Switch buildings in the header.</p>` : ''}
-      <div class="tiles">
-        <a class="tile" href="#/schedule"><strong>Schedule</strong><span>Today's inbound and outbound loads</span></a>
-        <a class="tile" href="#/receipts"><strong>Receiving</strong>
-          <span>${openCount ? `${openCount} open receipt${openCount === 1 ? '' : 's'}` : 'Receive pallets, print labels'}</span></a>
-        <a class="tile" href="#/lookup"><strong>Inventory Lookup</strong>
-          <span>${pallets.toLocaleString()} pallet${pallets === 1 ? '' : 's'} on hand</span></a>
-        <a class="tile" href="#/shipments"><strong>Shipping</strong>
-          <span>${openShip ? `${openShip} open shipment${openShip === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
-        <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
-        ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
-        ${can('manager') ? `<a class="tile" href="#/billing"><strong>Billing</strong><span>Rates, extra charges, monthly statements</span></a>` : ''}
-        ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, users, company info</span></a>` : ''}
-      </div>
-      <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
+      <div id="dash">
+        <div class="dash-head">
+          <div><h1 style="margin-bottom:2px">${esc(companyName())}</h1>
+            <div class="muted small">${scopeTxt} &middot; ${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div></div>
+          <div class="dash-filters">
+            ${multiOwner() ? `<select id="dash-acct" aria-label="Account"><option value="">All accounts</option>${activeOwners().map(o => `<option value="${o.id}" ${o.id === acct ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('')}</select>` : ''}
+            ${multiWh() ? `<label class="check"><input type="checkbox" id="dash-allwh" ${allWh ? 'checked' : ''}> All warehouses</label>` : ''}
+          </div>
+        </div>
+
+        <div class="tiles home-tiles">
+          <a class="tile" href="#/schedule"><strong>Schedule</strong><span>${inToday} in &middot; ${outToday} out today</span></a>
+          <a class="tile" href="#/receipts"><strong>Receiving</strong><span>${D.openR.length ? `${D.openR.length} open receipt${D.openR.length === 1 ? '' : 's'}` : 'Receive pallets, print labels'}</span></a>
+          <a class="tile" href="#/lookup"><strong>Inventory Lookup</strong><span>Scan or search pallets</span></a>
+          <a class="tile" href="#/shipments"><strong>Shipping</strong><span>${D.openS.length ? `${D.openS.length} open shipment${D.openS.length === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
+          <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
+          ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
+          ${can('manager') ? `<a class="tile" href="#/billing"><strong>Billing</strong><span>Rates, extra charges, monthly statements</span></a>` : ''}
+          ${can('manager') ? `<a class="tile" href="#/setup"><strong>Setup</strong><span>Items, locations, customers, users, company info</span></a>` : ''}
+        </div>
+
+        <div class="kpis">
+          ${kpi('Pallets on hand', inv.length.toLocaleString(), onHold ? `${onHold} on hold` : 'none on hold', '#/lookup')}
+          ${kpi('SKUs in stock', skus.toLocaleString(), inv.length ? `avg ${avgAge} days on hand` : '&nbsp;')}
+          ${kpi('Received, 30 days', received.length.toLocaleString(), `${recvMonth} this month`, '#/receipts')}
+          ${kpi('Shipped, 30 days', ship30.toLocaleString(), `${shipMonth} this month`, '#/shipments')}
+          ${kpi('Open loads', (openR.length + openS.length).toLocaleString(), `${openR.length} in &middot; ${openS.length} out`, '#/schedule')}
+          ${kpi('Trucks today', (inToday + outToday).toLocaleString(), `${inToday} in &middot; ${outToday} out`, '#/schedule')}
+          ${showBill ? kpi('Billing, month to date', money(billMtd), `${esc(monthLabel(ymOf(new Date())))}${acct ? '' : (n => ` &middot; ${n} account${n === 1 ? '' : 's'}`)(billRows.filter(r => Number(r.total) > 0).length)}`, '#/billing') : ''}
+        </div>
+
+        <div class="dash-grid">
+          <section class="card chart-card wide">
+            <div class="row spread"><h2 style="margin:0">Pallets in and out, last 30 days</h2>
+              <div class="legend"><span><i style="background:${VIZ.s1}"></i>Received</span><span><i style="background:${VIZ.s2}"></i>Shipped</span></div></div>
+            <div id="ch-activity" class="chart"></div>
+          </section>
+          <section class="card chart-card">
+            <h2 style="margin-top:0">${acct ? 'Top items on hand' : 'Pallets on hand by account'}</h2>
+            <div id="ch-accounts"></div>
+          </section>
+          <section class="card chart-card">
+            <h2 style="margin-top:0">Inventory age</h2>
+            <div id="ch-aging"></div>
+            <p class="muted small" style="margin:8px 0 0">Days since each pallet was received.</p>
+          </section>
+          <section class="card wide">
+            <h2 style="margin-top:0">By account</h2>
+            <div class="table-wrap"><table class="data" id="acct-table">
+              <thead><tr><th>Account</th><th class="num">Pallets</th><th class="num">On hold</th><th class="num">SKUs</th><th class="num">Qty on hand</th><th class="num">Oldest</th><th class="num">In 30d</th><th class="num">Out 30d</th>${showBill ? '<th class="num">Billing MTD</th>' : ''}</tr></thead>
+              <tbody>${accts.map(r => `<tr data-dash-acct="${r.o.id}" tabindex="0">
+                <td><strong>${esc(r.o.code)}</strong> <span class="muted">${esc(r.o.name)}</span></td>
+                <td class="num">${r.pallets.toLocaleString()}</td><td class="num">${r.hold || '-'}</td><td class="num">${r.skus}</td>
+                <td class="num">${esc(r.qty)}</td><td class="num">${r.oldest === null ? '-' : r.oldest + ' days'}</td>
+                <td class="num">${r.in30}</td><td class="num">${r.out30}</td>${showBill ? `<td class="num">${money(r.bill)}</td>` : ''}</tr>`).join('')
+                || `<tr><td colspan="9" class="muted">No accounts yet.</td></tr>`}</tbody>
+            </table></div>
+            ${multiOwner() && !acct ? '<p class="muted small" style="margin:8px 0 0">Click an account to focus the dashboard on it.</p>' : ''}
+          </section>
+          <section class="card wide">
+            <h2 style="margin-top:0">Top items on hand</h2>
+            <div class="table-wrap"><table class="data">
+              <thead><tr><th>SKU</th><th>Description</th>${multiOwner() ? '<th>Account</th>' : ''}<th class="num">Pallets</th><th class="num">Qty</th><th class="num">Oldest</th></tr></thead>
+              <tbody>${topItems.map(t => `<tr><td><a href="#/lookup/${encodeURIComponent(t.sku)}">${esc(t.sku)}</a></td><td>${esc(t.description || '')}</td>
+                ${multiOwner() ? `<td>${esc(ownerById(t.owner_id).code || '')}</td>` : ''}<td class="num">${t.pallets}</td>
+                <td class="num">${esc(fmtQty(t.qty))} ${esc(t.uom || '')}</td><td class="num">${t.oldest} days</td></tr>`).join('')
+                || `<tr><td colspan="6" class="muted">Nothing on hand.</td></tr>`}</tbody>
+            </table></div>
+          </section>
+        </div>
+        <p class="muted small" style="margin-top:4px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>
+      </div>`);
+
+    const draw = () => {
+      if (!document.getElementById('ch-activity')) return;
+      lineChart($('#ch-activity'), days, [
+        { name: 'Received', color: VIZ.s1, values: days.map(d => inByDay[d]) },
+        { name: 'Shipped', color: VIZ.s2, values: days.map(d => outByDay[d]) }
+      ]);
+    };
+    requestAnimationFrame(draw);   // after layout, so the chart gets its real width
+    S.dashResize = draw;
+    hBars($('#ch-accounts'), acct
+      ? topItems.slice(0, 8).map(t => ({ label: t.sku, value: t.pallets, tip: `${t.description || ''}` }))
+      : accts.filter(r => r.pallets).slice(0, 8).map(r => ({ label: r.o.code, value: r.pallets, tip: r.o.name })), 'pallets');
+    vBars($('#ch-aging'), buckets, 'pallets');
+
+    const refresh = () => viewHome().catch(e => { console.error(e); toast(friendly(e), 'bad'); });
+    $('#dash-acct')?.addEventListener('change', e => { savePref('dashOwner', e.target.value); refresh(); });
+    $('#dash-allwh')?.addEventListener('change', e => { savePref('dashAllWh', e.target.checked); refresh(); });
+    $$('[data-dash-acct]').forEach(tr => {
+      const go = () => { if (!multiOwner()) return; savePref('dashOwner', acct === tr.dataset.dashAcct ? '' : tr.dataset.dashAcct); refresh(); };
+      tr.onclick = go; tr.onkeydown = e => { if (e.key === 'Enter') go(); };
+    });
   }
+
+  /* ---- small hand-built charts (no library) ---- */
+  const VIZ = { s1: '#2a78d6', s2: '#eb6834', grid: '#e6e6ea', axis: '#5f6068' };
+  function vizTip() {
+    let t = document.getElementById('viz-tip');
+    if (!t) { t = document.createElement('div'); t.id = 'viz-tip'; t.className = 'viz-tip'; t.hidden = true; document.body.appendChild(t); }
+    return t;
+  }
+  // rows: [{ value, label, color? }] - built with textContent (labels are data)
+  function showTip(x, y, title, rows) {
+    const t = vizTip();
+    t.textContent = '';
+    const h = document.createElement('div'); h.className = 'viz-tip-title'; h.textContent = title; t.appendChild(h);
+    rows.forEach(r => {
+      const line = document.createElement('div'); line.className = 'viz-tip-row';
+      if (r.color) { const k = document.createElement('i'); k.style.background = r.color; line.appendChild(k); }
+      const v = document.createElement('strong'); v.textContent = r.value; line.appendChild(v);
+      const l = document.createElement('span'); l.textContent = ' ' + r.label; line.appendChild(l);
+      t.appendChild(line);
+    });
+    t.hidden = false;
+    const w = t.offsetWidth, hgt = t.offsetHeight;
+    t.style.left = Math.min(window.innerWidth - w - 8, Math.max(8, x + 14)) + 'px';
+    t.style.top = Math.max(8, y - hgt - 10) + 'px';
+  }
+  function hideTip() { const t = document.getElementById('viz-tip'); if (t) t.hidden = true; }
+  function niceMax(v) {
+    if (v <= 4) return 4;
+    const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+  }
+  const shortDay = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+
+  function lineChart(el, labels, series) {
+    const W = Math.max(280, el.clientWidth || 600), H = 230, L = 34, R = 70, T = 12, B = 26;
+    const max = niceMax(Math.max(1, ...series.flatMap(s => s.values)));
+    const x = i => L + (labels.length < 2 ? 0 : i * (W - L - R) / (labels.length - 1));
+    const y = v => T + (H - T - B) * (1 - v / max);
+    const ticks = [0, .25, .5, .75, 1].map(f => Math.round(max * f * 100) / 100);
+    const every = Math.ceil(labels.length / Math.max(2, Math.floor((W - L - R) / 80)));
+    const svg = `
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Pallets received and shipped per day, last 30 days" tabindex="0">
+        ${ticks.map(t => `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="${VIZ.grid}" stroke-width="1"/>
+          <text x="${L - 6}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="${VIZ.axis}">${t}</text>`).join('')}
+        ${labels.map((d, i) => i % every === 0 || i === labels.length - 1 ? `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="11" fill="${VIZ.axis}">${esc(shortDay(d))}</text>` : '').join('')}
+        ${series.map(s => `<polyline fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
+            points="${s.values.map((v, i) => `${x(i)},${y(v)}`).join(' ')}"/>`).join('')}
+        ${(() => { // direct end labels, nudged apart if they collide
+          const ends = series.map(s => ({ s, yy: y(s.values[s.values.length - 1]) })).sort((a, b) => a.yy - b.yy);
+          for (let i = 1; i < ends.length; i++) if (ends[i].yy - ends[i - 1].yy < 14) ends[i].yy = ends[i - 1].yy + 14;
+          return ends.map(e => `<text x="${W - R + 6}" y="${e.yy + 4}" font-size="12" fill="#1b1b1f">${esc(e.s.name)} ${e.s.values[e.s.values.length - 1]}</text>`).join('');
+        })()}
+        <line class="xhair" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="#1b1b1f" stroke-width="1" opacity="0"/>
+        ${series.map((s, k) => `<circle class="dot dot${k}" r="4" fill="${s.color}" stroke="#fff" stroke-width="2" opacity="0"/>`).join('')}
+        <rect class="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>
+      </svg>`;
+    el.innerHTML = svg;
+    const root = el.querySelector('svg'), hair = root.querySelector('.xhair'), hit = root.querySelector('.hit');
+    const at = (i, cx, cy) => {
+      hair.setAttribute('x1', x(i)); hair.setAttribute('x2', x(i)); hair.setAttribute('opacity', '.35');
+      series.forEach((s, k) => { const c = root.querySelector('.dot' + k); c.setAttribute('cx', x(i)); c.setAttribute('cy', y(s.values[i])); c.setAttribute('opacity', '1'); });
+      showTip(cx, cy, shortDay(labels[i]), series.map(s => ({ value: String(s.values[i]), label: s.name.toLowerCase() + ' pallets', color: s.color })));
+    };
+    const clear = () => { hair.setAttribute('opacity', '0'); root.querySelectorAll('.dot').forEach(c => c.setAttribute('opacity', '0')); hideTip(); };
+    let idx = labels.length - 1;
+    hit.addEventListener('pointermove', e => {
+      const r = root.getBoundingClientRect(), px = (e.clientX - r.left) * (W / r.width);
+      idx = Math.max(0, Math.min(labels.length - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, labels.length - 1)))));
+      at(idx, e.clientX, e.clientY);
+    });
+    hit.addEventListener('pointerleave', clear);
+    root.addEventListener('blur', clear);
+    root.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      idx = Math.max(0, Math.min(labels.length - 1, idx + (e.key === 'ArrowRight' ? 1 : -1)));
+      const r = root.getBoundingClientRect();
+      at(idx, r.left + x(idx) * r.width / W, r.top + 20);
+    });
+  }
+
+  // horizontal bars: rows [{label, value, tip}]
+  function hBars(el, rows, unit) {
+    if (!rows.length) { el.innerHTML = '<p class="muted">Nothing on hand.</p>'; return; }
+    const max = Math.max(...rows.map(r => r.value), 1);
+    el.innerHTML = `<div class="hbars">${rows.map((r, i) => `
+      <div class="hbar" data-i="${i}" tabindex="0">
+        <span class="hbar-label">${esc(r.label)}</span>
+        <span class="hbar-track"><span class="hbar-fill" style="width:${Math.max(1.5, 100 * r.value / max)}%"></span></span>
+        <span class="hbar-val">${r.value.toLocaleString()}</span>
+      </div>`).join('')}</div>`;
+    $$('.hbar', el).forEach(b => {
+      const r = rows[Number(b.dataset.i)];
+      const show = e => { const bb = b.getBoundingClientRect(); showTip(e?.clientX ?? bb.left + 60, e?.clientY ?? bb.top, r.label + (r.tip ? ' — ' + r.tip : ''), [{ value: r.value.toLocaleString(), label: unit, color: VIZ.s1 }]); };
+      b.addEventListener('pointermove', show); b.addEventListener('focus', () => show());
+      b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
+    });
+  }
+
+  // vertical bars: rows [{label, value}]
+  function vBars(el, rows, unit) {
+    const max = Math.max(...rows.map(r => r.value), 1);
+    el.innerHTML = `<div class="vbars">${rows.map((r, i) => `
+      <div class="vbar" data-i="${i}" tabindex="0">
+        <span class="vbar-val">${r.value.toLocaleString()}</span>
+        <span class="vbar-col"><span class="vbar-fill" style="height:${r.value ? Math.max(2, 100 * r.value / max) : 0}%"></span></span>
+        <span class="vbar-label">${esc(r.label)}</span>
+      </div>`).join('')}</div>`;
+    $$('.vbar', el).forEach(b => {
+      const r = rows[Number(b.dataset.i)];
+      const show = e => { const bb = b.getBoundingClientRect(); showTip(e?.clientX ?? bb.left, e?.clientY ?? bb.top, r.label + (r.label.includes('days') ? '' : ' days'), [{ value: r.value.toLocaleString(), label: unit, color: VIZ.s1 }]); };
+      b.addEventListener('pointermove', show); b.addEventListener('focus', () => show());
+      b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
+    });
+  }
+
 
   /* ------------------------------------------------------------------ */
   /* receiving: list                                                     */
@@ -497,14 +805,27 @@
         <div class="meta">${r.expected_at && !(r.pallets?.[0]?.count) ? 'Expected ' + esc(fmtDateTime(r.expected_at)) : esc(fmtDateTime(r.received_at))}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''} &middot; ${r.pallets?.[0]?.count ?? 0} pallets</div>
         <div class="meta">${esc([multiOwner() && ownerById(r.owner_id).code, r.vendor_name, r.carrier, r.trailer_no && 'Trailer ' + r.trailer_no, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
       </a>`;
+    // desktop: the same rows as a table
+    const table = list => `
+      <div class="card table-card dwrap"><table class="data">
+        <thead><tr><th>Receipt</th><th>Status</th>${multiOwner() ? '<th>Account</th>' : ''}<th>Expected / received</th><th>Door</th><th>Vendor</th><th>Carrier</th><th>Trailer</th><th>PO</th><th class="num">Pallets</th></tr></thead>
+        <tbody>${list.map(r => `<tr data-href="#/receipt/${r.id}">
+          <td><a href="#/receipt/${r.id}"><strong>${esc(r.receipt_no)}</strong></a></td>
+          <td>${r.status === 'open' && r.unloaded_at ? '<span class="badge open">Unloaded</span> ' : ''}${badge(r.status)}</td>
+          ${multiOwner() ? `<td>${esc(ownerById(r.owner_id).code || '')}</td>` : ''}
+          <td>${r.expected_at && !(r.pallets?.[0]?.count) ? 'Expected ' + esc(fmtDateTime(r.expected_at)) : esc(fmtDateTime(r.received_at))}</td>
+          <td>${esc(r.dock_door || '')}</td><td>${esc(r.vendor_name || '')}</td><td>${esc(r.carrier || '')}</td>
+          <td>${esc(r.trailer_no || '')}</td><td>${esc(r.po_number || '')}</td><td class="num">${r.pallets?.[0]?.count ?? 0}</td></tr>`).join('')}</tbody>
+      </table></div>`;
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <div class="row spread"><h1>Receiving${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
         ${can('operator') ? `<a class="btn" href="#/receipt/new">New Receipt</a>` : ''}</div>
       <h2>Open</h2>
-      ${open.length ? `<div class="list">${open.map(item).join('')}</div>` : `<p class="muted">No open receipts.</p>`}
+      ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open receipts.</p>`}
       <h2 style="margin-top:20px">Recent</h2>
-      ${rest.length ? `<div class="list">${rest.map(item).join('')}</div>` : `<p class="muted">Nothing yet.</p>`}`);
+      ${rest.length ? `<div class="list mlist">${rest.map(item).join('')}</div>${table(rest)}` : `<p class="muted">Nothing yet.</p>`}`);
+    wireRowLinks();
   }
 
   /* ------------------------------------------------------------------ */
@@ -1629,14 +1950,27 @@
         <div class="meta">${esc(fmtDate(r.ship_date))}${r.appt_time ? ' at ' + esc(fmtTime(r.appt_time)) : ''}${r.dock_door ? ' &middot; Door ' + esc(r.dock_door) : ''} &middot; ${r.shipment_lines?.[0]?.count ?? 0} pallets</div>
         <div class="meta">${esc([multiOwner() && ownerById(r.owner_id).code, r.carrier, r.customer_order_no && 'Order ' + r.customer_order_no, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
       </a>`;
+    const table = list => `
+      <div class="card table-card dwrap"><table class="data">
+        <thead><tr><th>Shipment</th><th>Status</th>${multiOwner() ? '<th>Account</th>' : ''}<th>Ship date</th><th>Appt</th><th>Door</th><th>Ship to</th><th>Carrier</th><th>Order</th><th>PO</th><th class="num">Pallets</th></tr></thead>
+        <tbody>${list.map(r => `<tr data-href="#/shipment/${r.id}">
+          <td><a href="#/shipment/${r.id}"><strong>${esc(r.shipment_no)}</strong></a></td>
+          <td>${r.status === 'open' && r.loaded_at ? '<span class="badge open">Loaded</span> ' : ''}${badge(r.status)}</td>
+          ${multiOwner() ? `<td>${esc(ownerById(r.owner_id).code || '')}</td>` : ''}
+          <td>${esc(fmtDate(r.ship_date))}</td><td>${r.appt_time ? esc(fmtTime(r.appt_time)) : ''}</td><td>${esc(r.dock_door || '')}</td>
+          <td>${esc(r.ship_to_name || '')}${r.ship_to_city ? '<span class="muted"> &middot; ' + esc([r.ship_to_city, r.ship_to_state].filter(Boolean).join(', ')) + '</span>' : ''}</td>
+          <td>${esc(r.carrier || '')}</td><td>${esc(r.customer_order_no || '')}</td><td>${esc(r.po_number || '')}</td>
+          <td class="num">${r.shipment_lines?.[0]?.count ?? 0}</td></tr>`).join('')}</tbody>
+      </table></div>`;
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <div class="row spread"><h1>Shipping${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
         ${can('operator') ? `<a class="btn" href="#/shipment/new">New Shipment</a>` : ''}</div>
       <h2>Open</h2>
-      ${open.length ? `<div class="list">${open.map(item).join('')}</div>` : `<p class="muted">No open shipments.</p>`}
+      ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open shipments.</p>`}
       <h2 style="margin-top:20px">Recent</h2>
-      ${rest.length ? `<div class="list">${rest.map(item).join('')}</div>` : `<p class="muted">Nothing yet.</p>`}`);
+      ${rest.length ? `<div class="list mlist">${rest.map(item).join('')}</div>${table(rest)}` : `<p class="muted">Nothing yet.</p>`}`);
+    wireRowLinks();
   }
 
   /* ------------------------------------------------------------------ */
