@@ -3,7 +3,27 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
-**v1.2.0 adds subcustomers and load parties:**
+**v1.3.0 lines up with the LWH WMS:**
+- **8 pallet identifiers**, matching LWH's Comments + Unique2–Unique8.
+  - **Mapping:** Customer Pallet ID = Comments, identifiers 2–8 = Unique2–8.
+  - **Setup:** name each one in Setup > Company (4–8 are tucked under
+    "Identifiers 4–8"). Each can be required, unique, and/or a barcode on the
+    label. Unnamed ones stay hidden.
+  - **Labels:** with many identifiers, labels switch to a compact two-column
+    list.
+  - **Search:** all identifiers can be scanned and searched.
+- **LWH WMS transfer import** (Setup > Import): paste the LWH inventory query
+  (ControlNumber … CurrentBay) straight from SQL Server.
+  - **Mapping:** SubCustNm = account, ItemNm = SKU, LotNum, Qty, CurrentBay =
+    location (in the selected warehouse), ControlNumber kept as "LWH Control #".
+  - **Handled for you:** NULL cells are read as blank, Still_In_Inventory = No
+    rows are skipped, and missing items and locations can be created.
+  - **No double loads:** a control number that's already here is refused.
+  - **Billing:** pallets load like opening inventory (no inbound charges).
+- **Export LWH format** (Inventory screen, managers): the filtered pallets in
+  the same LWH columns, plus our WMS pallet ID, for moving product back.
+
+**v1.2.0 added subcustomers and load parties:**
 - **Master bill-to accounts** (Setup > Accounts > Bills to):
   - **Subcustomers:** a plant or location bills to a master account. Each
     plant keeps its own items, inventory, receipts and shipments.
@@ -123,8 +143,9 @@ GitHub Pages, backed by the **Offsite WMS** Supabase project.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–013 and the `admin-users` Edge Function, all
-> applied to Offsite WMS.
+> **Database:** migrations 001–014 and the `admin-users` Edge Function.
+> **v1.3 needs migration 014** (`supabase/migrations/014_identifiers_transfer.sql`)
+> run before the new app files go live.
 
 ## Files
 

@@ -48,8 +48,7 @@ const WmsPrint = (() => {
   function idDefs(settings) {
     const st = settings || {};
     const out = [{ field: 'customer_pallet_id', label: st.cust_pallet_label || 'Customer Pallet ID', barcode: !!st.cust_pallet_barcode }];
-    if (st.ref1_label) out.push({ field: 'ref1', label: st.ref1_label, barcode: !!st.ref1_barcode });
-    if (st.ref2_label) out.push({ field: 'ref2', label: st.ref2_label, barcode: !!st.ref2_barcode });
+    for (let n = 1; n <= 7; n++) if (st['ref' + n + '_label']) out.push({ field: 'ref' + n, label: st['ref' + n + '_label'], barcode: !!st['ref' + n + '_barcode'] });
     return out;
   }
   const lotLabel = st => (st && st.lot_label) || 'Lot / Production #';
@@ -60,7 +59,7 @@ const WmsPrint = (() => {
     const company = esc((settings?.company_name || '').replace(/_/g, ' '));
     const ids = idDefs(settings);
     const one = p => {
-      const extraBc = ids.filter(d => d.barcode && p[d.field]).length;   // shrink the big barcode to make room
+      const extraBc = ids.filter(d => d.barcode && p[d.field]).length + (ids.filter(d => p[d.field]).length > 4 ? 2 : 0);   // shrink the big barcode to make room
       return `
       <section class="lbl">
         <div class="lbl-top"><span>${company}</span><span>${esc(fmtDate(p.received_at))}</span></div>
@@ -74,10 +73,15 @@ const WmsPrint = (() => {
           <div class="right"><div class="lbl-caption">QTY</div><div class="lbl-val big">${esc(fmtQty(p.qty))} <small>${esc(p.uom)}</small></div></div>
         </div>
         ${p.lot_number ? `<svg class="bc lbl-bc-sm" data-value="${esc(p.lot_number)}" data-h="40"></svg>` : ''}
-        ${ids.filter(d => p[d.field]).map(d => d.barcode
-          ? `<div class="lbl-idbc"><div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>
-              <svg class="bc lbl-bc-id" data-value="${esc(p[d.field])}" data-h="36"></svg></div>`
-          : `<div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('')}
+        ${ids.filter(d => p[d.field] && d.barcode).map(d =>
+          `<div class="lbl-idbc"><div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>
+              <svg class="bc lbl-bc-id" data-value="${esc(p[d.field])}" data-h="36"></svg></div>`).join('')}
+        ${(() => { // text-only identifiers: a compact two-column grid when there are many (e.g. Nissan's 8)
+          const t = ids.filter(d => p[d.field] && !d.barcode);
+          return t.length > 3
+            ? `<div class="lbl-ids">${t.map(d => `<div><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('')}</div>`
+            : t.map(d => `<div class="lbl-cust"><span class="lbl-caption">${esc(d.label.toUpperCase())}</span> ${esc(p[d.field])}</div>`).join('');
+        })()}
         ${(p.production_date || p.expiration_date) ? `<div class="lbl-dates">
             ${p.production_date ? `Prod: ${esc(fmtDate(p.production_date))}` : ''}
             ${p.expiration_date ? `&nbsp;&nbsp;Exp: ${esc(fmtDate(p.expiration_date))}` : ''}</div>` : ''}
@@ -112,6 +116,8 @@ const WmsPrint = (() => {
         .lbl-val.big { font-size: 28pt; }
         .lbl-val small { font-size: 12pt; }
         .lbl-cust { font-size: 13pt; font-weight: 700; margin-top: 4pt; }
+        .lbl-ids { display: grid; grid-template-columns: 1fr 1fr; gap: 1pt 8pt; margin-top: 4pt; font-size: 10pt; font-weight: 700; }
+        .lbl-ids div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .lbl-dates { font-size: 11pt; margin-top: 3pt; }
         .lbl-foot { font-size: 10pt; margin-top: 5pt; border-top: 1pt solid #000; padding-top: 3pt; }
       </style>`;

@@ -147,19 +147,22 @@
   function companyName() { return (S.settings?.company_name || 'Warehouse').replace(/_/g, ' '); }
 
   /* customer-configurable identifier labels (Company setup) */
+  const REF_NUMS = [1, 2, 3, 4, 5, 6, 7];
+  const REF_COLS = REF_NUMS.map(n => 'ref' + n).join(', ');
   const lbl = {
     lot: () => S.settings?.lot_label || 'Lot / Production #',
     lotShort: () => (S.settings?.lot_label || 'Lot').split(' /')[0].trim(),
     cust: () => S.settings?.cust_pallet_label || 'Customer Pallet ID',
     ref1: () => S.settings?.ref1_label || null,
-    ref2: () => S.settings?.ref2_label || null
+    ref2: () => S.settings?.ref2_label || null,
+    ref: n => S.settings?.['ref' + n + '_label'] || null
   };
   // extra identifiers that are switched on: [{ key, field, label, required, unique }]
   function idFields() {
     const st = S.settings || {};
     const out = [{ key: 'cust_id', field: 'customer_pallet_id', label: lbl.cust(), required: !!st.cust_pallet_required, unique: true }];
-    if (st.ref1_label) out.push({ key: 'ref1', field: 'ref1', label: st.ref1_label, required: !!st.ref1_required, unique: !!st.ref1_unique });
-    if (st.ref2_label) out.push({ key: 'ref2', field: 'ref2', label: st.ref2_label, required: !!st.ref2_required, unique: !!st.ref2_unique });
+    // identifiers 2-8 (ref1..ref7): shown only once named in Setup > Company
+    for (const n of REF_NUMS) if (st['ref' + n + '_label']) out.push({ key: 'ref' + n, field: 'ref' + n, label: st['ref' + n + '_label'], required: !!st['ref' + n + '_required'], unique: !!st['ref' + n + '_unique'] });
     return out;
   }
   // "Pallet ID P-1 · PGID PG-7" for list rows
@@ -1058,7 +1061,7 @@
     const [rcpt, pallets] = await Promise.all([
       q(sb.from('receipts').select('*').eq('id', id).single()),
       q(sb.from('pallets')
-        .select('id, lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes')
+        .select(`id, lp_id, customer_pallet_id, ${REF_COLS}, origin_ref, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes`)
         .eq('receipt_id', id).order('lp_id'))
     ]);
     if (rcpt.status === 'open' && can('operator') && !dockMode) await loadVendorSuggestions().catch(() => {});
@@ -1284,8 +1287,7 @@
                 p_production_date: $('#prod_date', form).value || null,
                 p_expiration_date: $('#exp_date', form).value || null,
                 p_notes: strOrNull($('#p_notes', form).value),
-                ...(lbl.ref1() ? { p_ref1: vals.ref1 } : {}),
-                ...(lbl.ref2() ? { p_ref2: vals.ref2 } : {})
+                ...Object.fromEntries(REF_NUMS.filter(n => lbl.ref(n)).map(n => ['p_ref' + n, vals['ref' + n]]))
               })));
             }
           } catch (err) {
@@ -1418,6 +1420,7 @@
             <div class="row">
               <button class="btn ghost sm" id="inv-clear" type="button">Clear</button>
               <button class="btn secondary sm" id="inv-csv" type="button">Export CSV</button>
+              ${can('manager') ? '<button class="btn secondary sm" id="inv-lwh" type="button" title="Same columns as the LWH WMS inventory query">Export LWH format</button>' : ''}
               <button class="btn secondary sm" id="inv-print" type="button">Print List</button>
               <button class="btn dark sm" id="inv-count" type="button">Location Report (QR)</button>
             </div>
@@ -1435,7 +1438,7 @@
         if (f.status && p.status !== f.status) return false;
         if (loc && !String(p.location || '').toUpperCase().startsWith(loc)) return false;
         if (w.length) {
-          const hay = [p.lp_id, p.customer_pallet_id, p.ref1, p.ref2, p.sku, p.description, p.lot_number, p.location, p.owner_code].join(' ').toUpperCase();
+          const hay = [p.lp_id, p.customer_pallet_id, ...REF_NUMS.map(n => p['ref' + n]), p.origin_ref, p.sku, p.description, p.lot_number, p.location, p.owner_code].join(' ').toUpperCase();
           if (!w.every(x => hay.includes(x))) return false;
         }
         return true;
@@ -1531,6 +1534,18 @@
       const n = downloadCsv(`inventory-${localStamp()}.csv`, current.cols.map(c => c[1]), current.rows.map(r => current.cols.map(([k]) => plain(r, k))));
       toast(`Exported ${n} row${n === 1 ? '' : 's'}.`);
     };
+    // the filtered pallets in the LWH WMS column layout (for moving product back to an LWH building)
+    $('#inv-lwh')?.addEventListener('click', () => busy($('#inv-lwh'), async () => {
+      const pals = current.pallets;
+      if (!pals.length) throw new Error('Nothing to export.');
+      const rc = await fetchIn([...new Set(pals.map(p => p.receipt_id).filter(Boolean))], ids => () => sb.from('receipts').select('id, vendor_name').in('id', ids).order('id'));
+      const vendor = Object.fromEntries(rc.map(r => [r.id, r.vendor_name]));
+      const n = downloadCsv(`lwh-transfer-${localStamp()}.csv`, [...LWH_COLS, 'WMS_Pallet_ID'],
+        pals.map(p => [p.origin_ref || '', p.receipt_no || '', p.owner_code || '', p.sku, p.lot_number || '', Number(p.qty_on_hand), p.warehouse_code || '',
+          p.customer_pallet_id || '', /^(OPENING INVENTORY|LWH TRANSFER)$/.test(vendor[p.receipt_id] || '') ? '' : (vendor[p.receipt_id] || ''),
+          ...REF_NUMS.map(k => p['ref' + k] || ''), p.warehouse_code || '', p.location || '', 'Yes', p.location || '', p.lp_id]));
+      toast(`Exported ${n} pallet${n === 1 ? '' : 's'} in LWH format.`);
+    }));
     $('#inv-print').onclick = () => {
       if (!current.rows.length) return toast('Nothing to print.', 'bad');
       const plain = (r, k) => k === 'days' ? String(daysOld(r.received_at)) : k === 'received_at' || k === 'oldest' ? fmtDate(r[k])
@@ -1600,7 +1615,7 @@
     if (!exact) {
       const safe = term.replace(/[,()*%\\]/g, ' ').trim();
       rows = safe ? await q(scope(sb.from('v_inventory').select('*'))
-        .or(`sku.ilike.*${safe}*,lot_number.ilike.*${safe}*,description.ilike.*${safe}*,lp_id.ilike.*${safe}*,customer_pallet_id.ilike.*${safe}*,ref1.ilike.*${safe}*,ref2.ilike.*${safe}*`)
+        .or(`sku.ilike.*${safe}*,lot_number.ilike.*${safe}*,description.ilike.*${safe}*,lp_id.ilike.*${safe}*,customer_pallet_id.ilike.*${safe}*,${REF_NUMS.map(n => `ref${n}.ilike.*${safe}*`).join(',')},origin_ref.ilike.*${safe}*`)
         .order('sku').order('lot_number').order('lp_id').limit(200)) : [];
     }
     if (stale()) return;
@@ -1646,6 +1661,7 @@
         ${multiOwner() ? `<dt>Account</dt><dd>${esc(p.owner_code || '')} — ${esc(p.owner_name || '')}</dd>` : ''}
         <dt>Status</dt><dd>${badge(p.status)}</dd>
         ${idFields().filter(f => p[f.field]).map(f => `<dt>${esc(f.label)}</dt><dd>${esc(p[f.field])}</dd>`).join('')}
+        ${p.origin_ref ? `<dt>LWH Control #</dt><dd>${esc(p.origin_ref)}</dd>` : ''}
         ${p.production_date ? `<dt>Produced</dt><dd>${esc(fmtDate(p.production_date))}</dd>` : ''}
         ${p.expiration_date ? `<dt>Expires</dt><dd>${esc(fmtDate(p.expiration_date))}</dd>` : ''}
         <dt>Received</dt><dd><a href="#/receipt/${p.receipt_id}" id="pm-rcpt">${esc(p.receipt_no || '')}</a> ${esc(fmtDate(p.received_at))}</dd>
@@ -2696,6 +2712,7 @@
     let data;
     try { data = await callAdminUsers({ action: 'list' }); }
     catch (e) { out.innerHTML = `<div class="notice bad">${esc(friendly(e))}</div>`; return; }
+    if (!out.isConnected || !S.profile) return;   // left the page (or signed out) while loading
     const users = data.users;
     out.innerHTML = `
       <div class="row spread" style="margin-bottom:10px">
@@ -2707,7 +2724,7 @@
             <span>${u.active ? '' : badge('inactive') + ' '}<span class="badge">${esc(u.role)}</span></span></div>
           <div class="meta">Sign in: <strong>${esc(u.login)}</strong></div>
           <div class="meta">${u.last_sign_in_at ? 'Last signed in ' + esc(fmtDateTime(u.last_sign_in_at)) : 'Never signed in'}
-            ${u.id === S.profile.id ? ' &middot; you' : ''}</div>
+            ${u.id === S.profile?.id ? ' &middot; you' : ''}</div>
         </a>`).join('')}
       <div class="notice" style="margin-top:12px">Dock and floor staff can use a simple username (like <strong>mike.dock</strong>) instead of an email.
         Passwords are set here; there is no email step.</div>`;
@@ -3264,7 +3281,7 @@
           .neq('status', 'void').eq('is_opening', false).gte('received_at', g.from).lt('received_at', g.to).order('id'));
         const byId = Object.fromEntries(rcpts.map(r => [r.id, r]));
         const pallets = await fetchIn(rcpts.map(r => r.id), chunk => () => sb.from('pallets')
-          .select('lp_id, customer_pallet_id, ref1, ref2, item_id, lot_number, qty_received, status, receipt_id')
+          .select(`lp_id, customer_pallet_id, ${REF_COLS}, item_id, lot_number, qty_received, status, receipt_id`)
           .in('receipt_id', chunk).neq('status', 'void').order('lp_id'));
         done(downloadCsv(`received-${g.f}-to-${g.t}.csv`,
           ['Warehouse', 'Account', 'Received', 'Receipt #', 'Vendor', 'Carrier', 'Trailer #', 'PO #', 'Inbound BOL', 'WMS Pallet ID', ...idHeaders(),
@@ -3676,15 +3693,41 @@
         ['pallets', 'Pallets (default 1)', ['pallets', 'palletcount', 'numpallets', 'count']],
         ['location', 'Location', ['location', 'loc', 'bin', 'bay', 'slot'], true],
         ['cust_id', lbl.cust(), ['custpalletid', 'customerpalletid', 'palletid', normKey(lbl.cust())]],
-        ...(lbl.ref1() ? [['ref1', lbl.ref1(), ['ref1', normKey(lbl.ref1())]]] : []),
-        ...(lbl.ref2() ? [['ref2', lbl.ref2(), ['ref2', normKey(lbl.ref2())]]] : []),
+        ...REF_NUMS.filter(n => lbl.ref(n)).map(n => ['ref' + n, lbl.ref(n), ['ref' + n, normKey(lbl.ref(n)), 'unique' + (n + 1)]]),
         ['received', 'Received date', ['received', 'receiveddate', 'datereceived', 'receivedon', 'date']],
         ['prod', 'Production date', ['productiondate', 'proddate', 'mfgdate']],
         ['exp', 'Expiration date', ['expirationdate', 'expdate', 'expires', 'bestby']]
       ],
       example: () => [...(multiOwner() ? [activeOwners()[0]?.code || 'MAIN'] : []), 'WID-100', '714', '40', '1', 'A01-1', 'OS-PAL-1001',
-        ...(lbl.ref1() ? ['PG-5001'] : []), ...(lbl.ref2() ? [''] : []), '2026-08-15', '', '']
+        ...REF_NUMS.filter(n => lbl.ref(n)).map(n => n === 1 ? 'PG-5001' : ''), '2026-08-15', '', '']
     }
+  };
+
+  // LWH WMS transfer: the exact columns of the LWH inventory query
+  const LWH_COLS = ['ControlNumber', 'INV_Receipt', 'SubCustNm', 'ItemNm', 'LotNum', 'Qty', 'Location', 'Comments', 'Vendor',
+    'Unique2', 'Unique3', 'Unique4', 'Unique5', 'Unique6', 'Unique7', 'Unique8', 'Warehouse', 'BayName', 'Still_In_Inventory', 'CurrentBay'];
+  IMPORTS.lwh = {
+    label: 'LWH WMS transfer', note: () => `Pallets moved from a Logistics Warehouse building. Paste the LWH inventory query (ControlNumber … CurrentBay) and they load into ${whById(S.whId).code || 'this warehouse'} as opening inventory: SubCustNm = account, ItemNm = SKU, Comments = ${lbl.cust()}, Unique2–8 = identifiers 2–8, CurrentBay = location, ControlNumber kept as LWH Control #. Rows marked Still_In_Inventory = No are skipped.`,
+    cols: () => [
+      ['location', 'CurrentBay', ['currentbay', 'bayname', 'bay'], true],
+      ['origin', 'ControlNumber', ['controlnumber', 'control'], false],
+      ['inv_receipt', 'INV_Receipt', ['invreceipt', 'receipt'], false],
+      ['account', 'SubCustNm', ['subcustnm', 'subcust', 'customer'], multiOwner()],
+      ['sku', 'ItemNm', ['itemnm', 'item', 'itemnumber'], true],
+      ['desc', 'Item description', ['itemdesc', 'itemdescription', 'description', 'desc'], false],
+      ['uom', 'UOM', ['uom', 'unit'], false],
+      ['lot', 'LotNum', ['lotnum', 'lot', 'lotnumber'], false],
+      ['qty', 'Qty', ['qty', 'quantity'], true],
+      ['src_wh', 'Location (LWH warehouse)', ['location', 'warehouse'], false],
+      ['cust_id', 'Comments', ['comments', 'customerpalletid'], false],
+      ['vendor', 'Vendor', ['vendor'], false],
+      ...REF_NUMS.map(n => ['ref' + n, 'Unique' + (n + 1), ['unique' + (n + 1)], false]),
+      ['still', 'Still_In_Inventory', ['stillininventory'], false],
+      ['received', 'Received date', ['receiveddate', 'datereceived', 'received'], false]
+    ],
+    templateCols: () => LWH_COLS,
+    example: () => ['4315581', '1201146', activeOwners()[0]?.code || 'ONEPH', '10038924', '715', '31', 'WHSE10', '265511001111', 'ONE SOURCE',
+      '26105500093', '', '', '', '', '', '', 'WHSE10', 'A02', 'Yes', 'A02']
   };
 
   function setupImport(out) {
@@ -3702,12 +3745,14 @@
           <input id="imp-file" type="file" accept=".csv,.txt,.tsv,.xlsx,.xls,text/csv"></div>
         <div class="field"><label for="imp-paste">…or paste rows copied from Excel or Google Sheets (include the header row)</label>
           <textarea id="imp-paste" rows="5" placeholder="Copy the cells, header row included, and paste here"></textarea></div>
-        ${kind !== 'opening' ? `<label class="check"><input type="checkbox" id="imp-update" checked> Update existing</label>` : `<label class="check"><input type="checkbox" id="imp-mkloc"> Create missing locations</label>`}
+        ${kind === 'opening' || kind === 'lwh' ? `<label class="check"><input type="checkbox" id="imp-mkloc" ${kind === 'lwh' ? 'checked' : ''}> Create missing locations</label>
+          ${kind === 'lwh' ? '<label class="check"><input type="checkbox" id="imp-mkitem" checked> Create missing items (description from the sheet, else the item number)</label>' : ''}`
+          : `<label class="check"><input type="checkbox" id="imp-update" checked> Update existing</label>`}
         <div class="btn-row"><button class="btn" id="imp-preview" type="button">Check rows</button></div>
       </div>
       <div id="imp-out"></div>`;
     $('#imp-kind', out).onchange = e => { savePref('importKind', e.target.value); setupImport(out); };
-    $('#imp-template', out).onclick = () => downloadCsv(`template-${kind}.csv`, spec.cols().map(c => c[1]), [spec.example()]);
+    $('#imp-template', out).onclick = () => downloadCsv(`template-${kind}.csv`, spec.templateCols ? spec.templateCols() : spec.cols().map(c => c[1]), [spec.example()]);
     $('#imp-preview', out).onclick = () => busy($('#imp-preview', out), async () => {
       let text = $('#imp-paste', out).value;
       const file = $('#imp-file', out).files[0];
@@ -3727,20 +3772,24 @@
   }
 
   async function importPreview(out, kind, grid, source) {
+    if (kind === 'lwh') S.lwhOrigins = new Set((await fetchAll(() => sb.from('pallets').select('origin_ref').not('origin_ref', 'is', null).neq('status', 'void').order('id'))).map(p => p.origin_ref));
     const spec = IMPORTS[kind], cols = spec.cols();
     const head = grid[0].map(normKey);
     const idx = {};
     for (const [k, label, aliases] of cols) {
-      const cands = [normKey(label), k.replace(/_/g, ''), ...aliases];
-      const i = head.findIndex(h => cands.includes(h));
-      if (i >= 0 && !Object.values(idx).includes(i)) idx[k] = i;
+      // try names in order (exact label first), skipping columns already taken
+      for (const c of [normKey(label), ...aliases, k.replace(/_/g, '')]) {
+        const i = head.findIndex((h, n) => h === c && !Object.values(idx).includes(n));
+        if (i >= 0) { idx[k] = i; break; }
+      }
     }
     const missing = cols.filter(c => c[3] && idx[c[0]] === undefined).map(c => c[1]);
     if (missing.length) throw new Error(`Missing required column${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}. Download the template to see the headers.`);
     const unused = grid[0].filter((h, i) => !Object.values(idx).includes(i) && String(h).trim());
     const update = $('#imp-update', out)?.checked;
     const mkLoc = $('#imp-mkloc', out)?.checked;
-    const get = (r, k) => idx[k] === undefined ? '' : String(r[idx[k]] ?? '').trim();
+    // SQL Server copies show empty cells as NULL: treat that as blank
+    const get = (r, k) => { if (idx[k] === undefined) return ''; const v = String(r[idx[k]] ?? '').trim(); return /^null$/i.test(v) ? '' : v; };
     const ownerFor = code => {
       if (!multiOwner()) return activeOwners()[0];
       return activeOwners().find(o => o.code.toUpperCase() === String(code).toUpperCase());
@@ -3802,12 +3851,17 @@
         r.data = { code, zone: strOrNull(g('zone')), loc_type: ['storage', 'floor', 'staging', 'dock', 'hold'].includes(t) ? t : 'storage',
           sort_order: Number.isFinite(sort) ? sort : 0, warehouse_id: S.whId };
         r.label = code;
-      } else if (kind === 'opening') {
+      } else if (kind === 'opening' || kind === 'lwh') {
+        if (kind === 'lwh' && /^(n|no|false|0)$/i.test(g('still'))) { r.skipReason = 'Not in inventory'; r.action = 'skip'; r.label = g('origin'); continue; }
         const o = ownerFor(g('account'));
-        if (!o) err(`Account "${g('account')}" not found`);
+        if (!o) err(`Account "${g('account')}" not found${kind === 'lwh' ? ' (add it in Setup > Accounts first)' : ''}`);
         const sku = g('sku').toUpperCase();
+        if (!sku) err('Item is blank');
         const it = o && S.items.find(i => i.owner_id === o.id && i.sku.toUpperCase() === sku && i.active);
-        if (o && !it) err(`SKU ${sku} is not set up${multiOwner() ? ' for ' + o.code : ''}. Import items first`);
+        const mkItem = kind === 'lwh' && $('#imp-mkitem', out)?.checked;
+        if (o && !it && !mkItem) err(`SKU ${sku} is not set up${multiOwner() ? ' for ' + o.code : ''}. Import items first`);
+        if (kind === 'lwh' && g('origin') && S.lwhOrigins?.has(g('origin'))) err(`Control # ${g('origin')} is already here`);
+        if (kind === 'lwh') for (const n of REF_NUMS) if (g('ref' + n) && !lbl.ref(n)) err(`Unique${n + 1} has data: name Identifier ${n + 1} in Setup > Company first`);
         const qty = numCell(g('qty'));
         if (!(qty > 0)) err('Qty must be more than 0');
         const pallets = idx.pallets === undefined || g('pallets') === '' ? 1 : numCell(g('pallets'));
@@ -3818,27 +3872,29 @@
         else if (!loc && !mkLoc) err(`Location ${locCode} not in ${whById(S.whId).code || 'this warehouse'} (check "Create missing locations")`);
         const lot = g('lot');
         if (it?.lot_required && !lot) err(`${lbl.lotShort()} is required for ${sku}`);
-        const ids = { cust_id: g('cust_id').toUpperCase(), ref1: g('ref1').toUpperCase(), ref2: g('ref2').toUpperCase() };
-        if (pallets > 1 && (ids.cust_id || ids.ref1 || ids.ref2)) err('A row with pallet IDs must be 1 pallet');
+        const ids = { cust_id: g('cust_id').toUpperCase(), ...Object.fromEntries(REF_NUMS.map(n => ['ref' + n, g('ref' + n).toUpperCase()])) };
+        if (pallets > 1 && Object.values(ids).some(Boolean)) err('A row with pallet IDs must be 1 pallet');
         const st = S.settings || {};
         if (st.cust_pallet_required && !ids.cust_id) err(`${lbl.cust()} is required`);
-        if (st.ref1_label && st.ref1_required && !ids.ref1) err(`${st.ref1_label} is required`);
-        if (st.ref2_label && st.ref2_required && !ids.ref2) err(`${st.ref2_label} is required`);
+        for (const n of REF_NUMS) if (st['ref' + n + '_label'] && st['ref' + n + '_required'] && !ids['ref' + n]) err(`${st['ref' + n + '_label']} is required`);
         for (const [k, v] of Object.entries(ids)) if (v) { const key = k + '|' + v; if (seen.has(key)) err(`${v} appears twice in this file`); seen.add(key); }
         const dates = { received: parseDateCell(g('received')), prod: parseDateCell(g('prod')), exp: parseDateCell(g('exp')) };
         for (const [k, v] of Object.entries(dates)) if (v === 'bad') err(`Can't read the ${k === 'received' ? 'received' : k === 'prod' ? 'production' : 'expiration'} date "${g(k)}"`);
         if (dates.received && dates.received !== 'bad' && dates.received > todayIso()) err('Received date is in the future');
-        r.data = { owner: o, item: it, qty, pallets, locCode, loc, lot: strOrNull(lot), ...ids, ...dates };
+        r.data = { owner: o, item: it, sku, newItem: !it && mkItem ? { desc: g('desc') || sku, uom: (g('uom') || S.settings?.default_uom || 'EA').toUpperCase() } : null,
+          qty, pallets, locCode, loc, lot: strOrNull(lot), ...ids, ...dates,
+          origin: kind === 'lwh' ? strOrNull(g('origin')) : null,
+          notes: kind === 'lwh' ? ['LWH transfer', g('inv_receipt') && 'receipt ' + g('inv_receipt'), g('vendor') && 'vendor ' + g('vendor'), g('src_wh') && 'from ' + g('src_wh')].filter(Boolean).join(' · ') : null };
         r.label = `${sku} ${lot}`.trim();
       }
-      r.action = r.error ? 'error' : r.existing ? (update ? 'update' : 'skip') : 'new';
+      r.action = r.error ? 'error' : r.skipReason ? 'skip' : r.existing ? (update ? 'update' : 'skip') : 'new';
     }
     const counts = { new: 0, update: 0, skip: 0, error: 0 };
     rows.forEach(r => counts[r.action]++);
-    const palletTotal = kind === 'opening' ? rows.filter(r => r.action === 'new').reduce((a, r) => a + r.data.pallets, 0) : 0;
-    const newLocs = kind === 'opening' ? [...new Set(rows.filter(r => r.action === 'new' && !r.data.loc).map(r => r.data.locCode))] : [];
+    const palletTotal = kind === 'opening' || kind === 'lwh' ? rows.filter(r => r.action === 'new').reduce((a, r) => a + r.data.pallets, 0) : 0;
+    const newLocs = kind === 'opening' || kind === 'lwh' ? [...new Set(rows.filter(r => r.action === 'new' && !r.data.loc).map(r => r.data.locCode))] : [];
     const doCount = counts.new + counts.update;
-    const what = kind === 'opening' ? `${palletTotal} pallet${palletTotal === 1 ? '' : 's'}` : `${counts.new} new, ${counts.update} update${counts.update === 1 ? '' : 's'}`;
+    const what = kind === 'opening' || kind === 'lwh' ? `${palletTotal} pallet${palletTotal === 1 ? '' : 's'}` : `${counts.new} new, ${counts.update} update${counts.update === 1 ? '' : 's'}`;
     const badge2 = a => a === 'error' ? '<span class="badge void">error</span>' : a === 'update' ? '<span class="badge hold">update</span>' : a === 'skip' ? '<span class="badge">skip</span>' : '<span class="badge open">new</span>';
     const shownCols = Object.keys(idx);
     const resOut = $('#imp-out', out);
@@ -3852,7 +3908,7 @@
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Row</th><th>Result</th>${shownCols.map(k => `<th>${esc(cols.find(c => c[0] === k)[1])}</th>`).join('')}<th>Problem</th></tr></thead>
           <tbody>${rows.slice(0, 300).map(r => `<tr class="${r.action === 'error' ? 'imp-err' : ''}"><td>${r.line}</td><td>${badge2(r.action)}</td>
-            ${shownCols.map(k => `<td>${esc(get(r.raw, k))}</td>`).join('')}<td>${esc(r.error || '')}</td></tr>`).join('')}</tbody>
+            ${shownCols.map(k => `<td>${esc(get(r.raw, k))}</td>`).join('')}<td>${esc(r.error || r.skipReason || '')}</td></tr>`).join('')}</tbody>
         </table></div>
         ${rows.length > 300 ? `<p class="muted small">Showing the first 300 rows of ${rows.length}.</p>` : ''}
         <div class="btn-row">
@@ -3864,7 +3920,7 @@
     $('#imp-errs', resOut)?.addEventListener('click', () => downloadCsv(`import-errors-${kind}.csv`, [...grid[0], 'Problem'],
       rows.filter(r => r.error).map(r => [...r.raw, r.error])));
     $('#imp-go', resOut)?.addEventListener('click', async () => {
-      if (!await askConfirm(`Import ${what}?`, kind === 'opening'
+      if (!await askConfirm(`Import ${what}?`, kind === 'opening' || kind === 'lwh'
         ? `This puts ${esc(what)} into ${esc(whById(S.whId).code || 'inventory')} on an Opening Inventory receipt. Pallets that need fixing later can be voided.`
         : 'Rows marked new are added and rows marked update are overwritten with the sheet\'s values.', 'Import')) return;
       busy($('#imp-go', resOut), () => runImport(resOut, kind, rows.filter(r => r.action === 'new' || r.action === 'update'), source, newLocs));
@@ -3892,7 +3948,17 @@
         if (done % 25 === 0) say(`Saved ${done} of ${rows.length}…`);
       }
     } else {
-      // opening inventory: missing locations, one closed receipt per account, then each pallet
+      // opening inventory: missing items (LWH transfer), missing locations, one closed receipt per account, then each pallet
+      const wantItems = new Map();
+      rows.filter(r => r.data.newItem).forEach(r => wantItems.set(r.data.owner.id + '|' + r.data.sku, r));
+      for (const r of wantItems.values()) {
+        try { await q(sb.from('items').insert({ owner_id: r.data.owner.id, sku: r.data.sku, description: r.data.newItem.desc, uom: r.data.newItem.uom, lot_required: false })); }
+        catch (e) { if (!/already exists/i.test(friendly(e))) fails.push([r.line, r.label, friendly(e)]); }
+      }
+      if (wantItems.size) {
+        await loadRef();
+        rows.forEach(r => { if (!r.data.item) r.data.item = S.items.find(i => i.owner_id === r.data.owner.id && i.sku.toUpperCase() === r.data.sku); });
+      }
       for (const code of newLocs) {
         try { await q(sb.from('locations').insert({ code, loc_type: 'storage', warehouse_id: S.whId })); }
         catch (e) { if (!/already exists/i.test(friendly(e))) throw e; }
@@ -3903,16 +3969,18 @@
       rows.forEach(r => (byOwner[r.data.owner.id] = byOwner[r.data.owner.id] || []).push(r));
       const receipts = [];
       for (const [ownerId, list] of Object.entries(byOwner)) {
-        const [rc] = await q(sb.from('receipts').insert({ vendor_name: 'OPENING INVENTORY', is_opening: true, warehouse_id: S.whId, owner_id: ownerId,
+        const [rc] = await q(sb.from('receipts').insert({ vendor_name: kind === 'lwh' ? 'LWH TRANSFER' : 'OPENING INVENTORY', is_opening: true, warehouse_id: S.whId, owner_id: ownerId,
           notes: `Spreadsheet import: ${source}` }).select('id, receipt_no'));
         receipts.push(rc);
         for (const r of list) {
+          if (!r.data.item) { fails.push([r.line, r.label, 'Item could not be created']); continue; }
           const loc = whLocations().find(l => l.code.toUpperCase() === r.data.locCode);
           for (let n = 0; n < r.data.pallets; n++) {
             try {
               await q(sb.rpc('wms_import_opening_pallet', { p_receipt_id: rc.id, p_item_id: r.data.item.id, p_qty: r.data.qty, p_lot_number: r.data.lot,
                 p_location_id: loc?.id || null, p_customer_pallet_id: r.data.cust_id || null, p_production_date: r.data.prod, p_expiration_date: r.data.exp,
-                p_ref1: r.data.ref1 || null, p_ref2: r.data.ref2 || null, p_received_on: r.data.received }));
+                ...Object.fromEntries(REF_NUMS.map(n => ['p_ref' + n, r.data['ref' + n] || null])), p_received_on: r.data.received,
+                p_origin_ref: r.data.origin || null, p_notes: r.data.notes || null }));
               done++;
             } catch (e) { fails.push([r.line, r.label, friendly(e)]); break; }
             if (done % 10 === 0) say(`Loaded ${done} of ${total} pallets…`);
@@ -3935,11 +4003,11 @@
     }
     await loadRef();
     const recLinks = (rows.receipts || []).map(rc => `<a href="#/receipt/${rc.id}">${esc(rc.receipt_no)}</a>`).join(', ');
-    say(`<strong>Done: ${done} ${kind === 'opening' ? 'pallets loaded' : 'saved'}.</strong>${recLinks ? ' Receipt ' + recLinks + '.' : ''}${fails.length ? ` ${fails.length} failed (below).` : ''}
+    say(`<strong>Done: ${done} ${kind === 'opening' || kind === 'lwh' ? 'pallets loaded' : 'saved'}.</strong>${recLinks ? ' Receipt ' + recLinks + '.' : ''}${fails.length ? ` ${fails.length} failed (below).` : ''}
       ${fails.length ? `<div class="table-wrap" style="margin-top:8px"><table class="data"><thead><tr><th>Row</th><th>Record</th><th>Problem</th></tr></thead>
         <tbody>${fails.map(f => `<tr><td>${f[0]}</td><td>${esc(f[1])}</td><td>${esc(f[2])}</td></tr>`).join('')}</tbody></table></div>` : ''}`, fails.length ? 'warn' : 'ok');
     $('#imp-go', box)?.remove();
-    toast(`Import finished: ${done} ${kind === 'opening' ? 'pallets' : 'rows'}.`);
+    toast(`Import finished: ${done} ${kind === 'opening' || kind === 'lwh' ? 'pallets' : 'rows'}.`);
   }
 
   function setupAccounts(out) {
@@ -4090,14 +4158,14 @@
               <label class="check"><input type="checkbox" id="c-custreq" ${s.cust_pallet_required ? 'checked' : ''}> Required</label>
               <label class="check"><input type="checkbox" id="c-custbc" ${s.cust_pallet_barcode ? 'checked' : ''}> Barcode on label</label>
             </div></div>
-          ${[1, 2].map(n => `
-          <div class="field"><label for="c-ref${n}">Extra identifier ${n} name</label>
+          ${REF_NUMS.map(n => `${n === 3 ? `<details class="more" ${REF_NUMS.slice(2).some(k => s['ref' + k + '_label']) ? 'open' : ''}><summary>Identifiers 4–8 (e.g. Nissan)</summary>` : ''}
+          <div class="field"><label for="c-ref${n}">Identifier ${n + 1} name <span class="muted small">(LWH Unique${n + 1})</span></label>
             <input id="c-ref${n}" value="${esc(s['ref' + n + '_label'] || '')}" maxlength="30" placeholder="Leave blank to hide">
             <div class="row" style="margin-top:6px">
               <label class="check"><input type="checkbox" id="c-ref${n}req" ${s['ref' + n + '_required'] ? 'checked' : ''}> Required</label>
               <label class="check"><input type="checkbox" id="c-ref${n}uniq" ${s['ref' + n + '_unique'] ? 'checked' : ''}> Unique per pallet</label>
               <label class="check"><input type="checkbox" id="c-ref${n}bc" ${s['ref' + n + '_barcode'] ? 'checked' : ''}> Barcode on label</label>
-            </div></div>`).join('')}
+            </div></div>${n === REF_NUMS[REF_NUMS.length - 1] ? '</details>' : ''}`).join('')}
         </div>
         ${'theme' in s ? `
         <h2 style="margin-top:18px">Look</h2>
@@ -4128,7 +4196,7 @@
           cust_pallet_required: $('#c-custreq', out).checked,
           cust_pallet_barcode: $('#c-custbc', out).checked
         };
-        for (const n of [1, 2]) {
+        for (const n of REF_NUMS) {
           row['ref' + n + '_label'] = strOrNull($('#c-ref' + n, out).value);
           row['ref' + n + '_required'] = $('#c-ref' + n + 'req', out).checked;
           row['ref' + n + '_unique'] = $('#c-ref' + n + 'uniq', out).checked;
