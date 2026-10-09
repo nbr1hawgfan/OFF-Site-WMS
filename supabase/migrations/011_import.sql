@@ -1,5 +1,5 @@
 -- =====================================================================
---  Customer Lite WMS  —  Migration 011: spreadsheet import / opening inventory / theme
+--  Customer Lite WMS  —  Migration 011: spreadsheet import / opening inventory
 --   * receipts.is_opening: the go-live load of pallets already in the building
 --   * wms_import_opening_pallet(): receive one pallet onto an opening receipt,
 --     keeping its original received date (managers only)
@@ -10,11 +10,6 @@
 begin;
 
 alter table public.receipts add column is_opening boolean not null default false;
-
--- look of the app: 'lwh' (red) or 'modern' (white + one accent color)
-alter table public.settings
-  add column theme text not null default 'lwh' check (theme in ('lwh', 'modern')),
-  add column accent_color text check (accent_color is null or accent_color ~ '^#[0-9A-Fa-f]{6}$');
 
 -- only managers can mark a receipt as opening inventory (it isn't billed as inbound)
 create or replace function public.trg_receipt_opening_guard()
