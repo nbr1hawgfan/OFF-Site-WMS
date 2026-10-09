@@ -3877,7 +3877,16 @@
         const st = S.settings || {};
         if (st.cust_pallet_required && !ids.cust_id) err(`${lbl.cust()} is required`);
         for (const n of REF_NUMS) if (st['ref' + n + '_label'] && st['ref' + n + '_required'] && !ids['ref' + n]) err(`${st['ref' + n + '_label']} is required`);
-        for (const [k, v] of Object.entries(ids)) if (v) { const key = k + '|' + v; if (seen.has(key)) err(`${v} appears twice in this file`); seen.add(key); }
+        // repeats only matter for identifiers that must be unique (customer pallet ID always is)
+        for (const [k, v] of Object.entries(ids)) {
+          if (!v) continue;
+          const f = k === 'cust_id' ? { label: lbl.cust(), unique: true } : { label: st[k + '_label'], unique: !!st[k + '_unique'] };
+          if (!f.unique) continue;
+          const key = k + '|' + v;
+          if (seen.has(key)) err(k === 'cust_id' ? `${f.label} ${v} appears twice in this file`
+            : `${f.label} ${v} repeats in this file, but ${f.label} is set to "Unique per pallet" (Setup > Company). Untick it if this value covers several pallets`);
+          seen.add(key);
+        }
         const dates = { received: parseDateCell(g('received')), prod: parseDateCell(g('prod')), exp: parseDateCell(g('exp')) };
         for (const [k, v] of Object.entries(dates)) if (v === 'bad') err(`Can't read the ${k === 'received' ? 'received' : k === 'prod' ? 'production' : 'expiration'} date "${g(k)}"`);
         if (dates.received && dates.received !== 'bad' && dates.received > todayIso()) err('Received date is in the future');
