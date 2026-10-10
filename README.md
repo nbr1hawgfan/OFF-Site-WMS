@@ -3,6 +3,11 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.5.1 full history export** (Reports, managers): one Excel workbook with
+every pallet (any status), every transaction, receipts, shipments and their
+pallets, charges, rates, items, accounts, locations and ship-tos, plus an About
+sheet with row counts. Meant as a monthly off-site copy of the records.
+
 **v1.5.0 pallet history + warehouse-aware accounts:**
 - **Pallet History** (Reports, or `#/history`): find any pallet by any ID, even
   shipped or voided, for its full record:

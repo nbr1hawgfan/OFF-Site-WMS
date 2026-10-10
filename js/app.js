@@ -3447,6 +3447,68 @@
   /* ------------------------------------------------------------------ */
   /* REPORTS & EXPORTS (CSV, opens in Excel)                             */
   /* ------------------------------------------------------------------ */
+  /* full records export: one workbook, every table, readable codes next to the raw ids */
+  async function fullExport() {
+    const msg = $('#rpt-msg');
+    const say = t => { if (msg) msg.innerHTML = `<div class="notice">${esc(t)}</div>`; };
+    say('Loading the Excel writer...');
+    await loadXlsxLib();
+    const all = (table, sel = '*', ord = 'id') => fetchAll(() => sb.from(table).select(sel).order(ord));
+    say('Reading pallets and transactions (large accounts can take a minute)...');
+    const [pallets, txns, receipts, shipments, slines, charges, rates, parties] = await Promise.all([
+      all('pallets'), all('v_transactions'), all('receipts'), all('shipments'),
+      all('v_shipment_detail', '*', 'line_id'), all('manual_charges').catch(() => []),
+      all('account_rates').catch(() => []), all('parties')
+    ]);
+    say('Building the workbook...');
+    const wh = id => whById(id).code || '', acct = id => ownerById(id).code || '', loc = id => locById(id).code || '';
+    const user = id => userName(id) || '';
+    const rcptNo = Object.fromEntries(receipts.map(r => [r.id, r.receipt_no]));
+    const shipNo = Object.fromEntries(shipments.map(x => [x.id, x.shipment_no]));
+    const ids = idFields();
+    const sheets = {
+      Pallets: pallets.map(p => { const it = itemById(p.item_id), l = locById(p.location_id);
+        return { 'WMS Pallet ID': p.lp_id, ...Object.fromEntries(ids.map(f => [f.label, p[f.field] || ''])), 'LWH Control #': p.origin_ref || '',
+          Account: acct(it.owner_id), SKU: it.sku, Description: it.description, [lbl.lotShort()]: p.lot_number || '',
+          'Production Date': p.production_date || '', 'Expiration Date': p.expiration_date || '', 'Qty Received': Number(p.qty_received), 'Qty On Hand': Number(p.qty_on_hand),
+          UOM: it.uom, Status: p.status, Warehouse: wh(l.warehouse_id), Location: l.code || '', 'Receipt #': rcptNo[p.receipt_id] || '',
+          Received: fmtDateTime(p.created_at), Notes: p.notes || '', pallet_uuid: p.id }; }),
+      Transactions: txns.map(t => ({ When: fmtDateTime(t.created_at), Action: t.txn_type, Account: t.owner_code, 'WMS Pallet ID': t.lp_id, [lbl.cust()]: t.customer_pallet_id || '',
+        SKU: t.sku, [lbl.lotShort()]: t.lot_number || '', 'Qty Change': Number(t.qty_change), 'Qty After': Number(t.qty_after),
+        'From Warehouse': t.from_warehouse || '', From: t.from_location || '', 'To Warehouse': t.to_warehouse || '', To: t.to_location || '',
+        'Receipt #': t.receipt_no || '', 'BOL #': t.shipment_no || '', Reason: t.reason || '', User: t.user_name || '', Opening: t.opening ? 'Y' : '', txn_id: t.id })),
+      Receipts: receipts.map(r => ({ 'Receipt #': r.receipt_no, Account: acct(r.owner_id), Warehouse: wh(r.warehouse_id), Status: r.status,
+        Received: fmtDateTime(r.received_at), Opening: r.is_opening ? 'Y' : '', ...strip(r) })),
+      Shipments: shipments.map(x => ({ 'BOL #': x.shipment_no, Account: acct(x.owner_id), Warehouse: wh(x.warehouse_id), Status: x.status,
+        Shipped: fmtDateTime(x.shipped_at), ...strip(x) })),
+      'Shipment Pallets': slines.map(l => ({ 'BOL #': shipNo[l.shipment_id] || '', 'WMS Pallet ID': l.lp_id, ...Object.fromEntries(ids.map(f => [f.label, l[f.field] || ''])),
+        SKU: l.sku, Description: l.description, [lbl.lotShort()]: l.lot_number || '', Qty: Number(l.qty), UOM: l.uom, 'Weight (lbs)': Number(l.product_weight_lbs || 0), Added: fmtDateTime(l.created_at) })),
+      Charges: charges.map(c => ({ Date: c.charge_date, Account: acct(c.owner_id), Code: chargeTypeById(c.charge_type_id).code || '', Charge: chargeTypeById(c.charge_type_id).name || '',
+        Qty: Number(c.qty), Rate: Number(c.rate), Amount: Number(c.amount), 'Receipt #': rcptNo[c.receipt_id] || '', 'BOL #': shipNo[c.shipment_id] || '', Note: c.description || '', By: user(c.created_by) })),
+      Rates: rates.map(r => ({ Account: acct(r.owner_id), Basis: r.basis, Code: r.charge_type_id ? chargeTypeById(r.charge_type_id).code : '', Rate: Number(r.rate), Qty: r.qty ?? '', ...strip(r) })),
+      Items: (S.items || []).map(i => ({ Account: acct(i.owner_id), ...strip(i) })),
+      Accounts: (S.owners || []).map(o => ({ Code: o.code, Name: o.name, 'Bills to': o.bill_to_id ? acct(o.bill_to_id) : '', ...strip(o, ['id_rules']), id_rules: o.id_rules ? JSON.stringify(o.id_rules) : '' })),
+      Locations: (S.locations || []).map(l => ({ Warehouse: wh(l.warehouse_id), ...strip(l) })),
+      'Ship-To & Vendors': parties.map(x => strip(x))
+    };
+    const wb = window.XLSX.utils.book_new();
+    const about = [['Full history export'], ['Company', companyName()], ['Exported', fmtDateTime(new Date())], ['By', S.profile?.full_name || ''],
+      ['App version', cfg.APP_VERSION || ''], [], ['Sheet', 'Rows'], ...Object.entries(sheets).map(([k, v]) => [k, v.length])];
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(about), 'About');
+    for (const [name, rows] of Object.entries(sheets)) window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ '(none)': '' }]), name.slice(0, 31));
+    window.XLSX.writeFile(wb, `wms-full-export-${localStamp()}.xlsx`, { compression: true });
+    msg.innerHTML = `<div class="notice ok">Downloaded: ${fmtQty(pallets.length)} pallets, ${fmtQty(txns.length)} transactions, ${fmtQty(receipts.length)} receipts, ${fmtQty(shipments.length)} shipments.</div>`;
+  }
+  // a record as plain cells: objects to JSON, booleans to Y/blank
+  function strip(r, skip = []) {
+    const out = {};
+    for (const [k, v] of Object.entries(r)) {
+      if (skip.includes(k)) continue;
+      out[k] = v === null || v === undefined ? '' : typeof v === 'boolean' ? (v ? 'Y' : '') : typeof v === 'object' ? JSON.stringify(v) : v;
+    }
+    return out;
+  }
+
   function downloadCsv(filename, headers, rows) {
     const cell = v => {
       if (v === null || v === undefined) return '';
@@ -3525,6 +3587,11 @@
         <div class="btn-row"><button class="btn" data-view="asof">Show inventory</button></div>
         <div class="hint">Rebuilt from the pallet history, e.g. month-end inventory for a customer or an audit.</div>
       </div>
+      ${can('manager') ? `<div class="card">
+        <h2>Full history export</h2>
+        <p class="muted small" style="margin-top:0">One Excel workbook with everything: every pallet ever (any status), every transaction, receipts, shipments and their pallets, charges, items, accounts, locations and ship-tos. Save one each month to your own drive as an off-site copy of the records.</p>
+        <div class="btn-row"><button class="btn" id="full-export" type="button">Download full export</button></div>
+      </div>` : ''}
       <div id="rpt-msg"></div>
       <div id="rpt-out"></div>`);
 
@@ -3655,6 +3722,7 @@
       }
     };
     $$('[data-view]').forEach(b => b.onclick = () => busy(b, views[b.dataset.view]));
+    $('#full-export')?.addEventListener('click', e => busy(e.target, fullExport));
     $('#ph-go').onclick = () => { const t = $('#ph-q').value.trim(); location.hash = '#/history' + (t ? '/' + encodeURIComponent(t) : ''); };
     $('#ph-q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#ph-go').click(); } });
     $('#lt-lot').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); busy($('[data-view=trace]'), views.trace); } });
