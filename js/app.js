@@ -11,7 +11,9 @@
 
   // lift (dock) sits between viewer and operator: it can scan, receive, load and
   // move, but never edits receipt/shipment details. The database enforces the same.
-  const RANK = { viewer: 1, lift: 1.5, operator: 2, manager: 3, admin: 4 };
+  // customer: a portal login for one account (and its subs). Read-only, like a viewer, but the
+  // database only shows it that account's data; staff-only screens are hidden from it.
+  const RANK = { customer: 1, viewer: 1, lift: 1.5, operator: 2, manager: 3, admin: 4 };
   const S = {
     session: null, profile: null, settings: null,
     items: [], locations: [], parties: [],
@@ -19,6 +21,7 @@
   };
   const can = role => !!S.profile && S.profile.active && RANK[S.profile.role] >= RANK[role];
   const isLift = () => !!S.profile && S.profile.active && S.profile.role === 'lift';
+  const isCustomer = () => !!S.profile && S.profile.active && S.profile.role === 'customer';
   const canDock = () => isLift() || can('operator');
 
   /* ------------------------------------------------------------------ */
@@ -371,6 +374,14 @@
     S.whId = ok(S.whId) ? S.whId : ok(pref) ? pref : ok(S.profile?.home_warehouse_id) ? S.profile.home_warehouse_id
       : (warehouses.find(w => w.active) || {}).id;
     S.users = await q(sb.from('app_users').select('id, full_name')).catch(() => []);
+    if (isCustomer() && !loadPref('custInit', false)) {
+      const rows = await fetchAll(() => sb.from('v_inventory_by_lot').select('warehouse_id, pallets').order('warehouse_id')).catch(() => []);
+      const per = {}; rows.forEach(r => { per[r.warehouse_id] = (per[r.warehouse_id] || 0) + Number(r.pallets); });
+      const top = Object.entries(per).sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (top && ok(top)) { S.whId = top; savePref('wh', top); }
+      savePref('dashAllWh', true); savePref('lookupAllWh', true); savePref('invFilter', { ...loadPref('invFilter', {}), allWh: true });
+      savePref('custInit', true);
+    }
     await loadWhStock();
     document.title = (cfg.BRAND_SHORT || '') + ' WMS';
   }
@@ -488,14 +499,18 @@
     document.documentElement.style.setProperty('--hdr', ($('.app-header')?.offsetHeight || 62) + 'px');
     const nav = $('#sidenav');
     if (!office) { nav.innerHTML = ''; return; }
-    const items = [
+    const cust = isCustomer();
+    const items = cust ? [
+      ['', 'Dashboard', true, []], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['history', 'Pallet History', true, ['pallet']],
+      ['receipts', 'Receipts', true, ['receipt']], ['shipments', 'Shipments', true, ['shipment']], ['schedule', 'Schedule', true, []], ['reports', 'Reports', true, []]
+    ] : [
       ['', 'Dashboard', true, []], ['schedule', 'Schedule', true, []], ['receipts', 'Receiving', true, ['receipt']],
       ['shipments', 'Shipping', true, ['shipment']], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['reports', 'Reports', true, []],
       ['billing', 'Billing', can('manager'), []], ['setup', 'Setup', can('manager'), []], ['dock', 'Dock Mode', can('operator'), []]
     ];
     nav.innerHTML = items.filter(n => n[2]).map(([k, label, , alias]) =>
       `<a href="#/${k}" class="${a === k || alias.includes(a) ? 'active' : ''}">${label}</a>`).join('')
-      + `<div class="nav-foot">${esc(S.profile.full_name)}<br>${esc(S.profile.role)} &middot; v${esc(cfg.APP_VERSION)}</div>`;
+      + `<div class="nav-foot">${esc(S.profile.full_name)}<br>${esc(cust ? 'customer · ' + (ownerById(S.profile.owner_id).code || '') : S.profile.role)} &middot; v${esc(cfg.APP_VERSION)}</div>`;
   }
   // table rows that open a record when clicked anywhere
   function wireRowLinks(root = document) {
@@ -504,6 +519,7 @@
   let resizeTimer;
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (document.getElementById('dash') && S.dashResize) S.dashResize(); }, 150); });
 
+  const CUSTOMER_ROUTES = ['', 'inventory', 'lookup', 'pallet', 'history', 'receipts', 'receipt', 'shipments', 'shipment', 'schedule', 'reports'];
   async function route() {
     const path = location.hash.replace(/^#\/?/, '');
     const [a, b, c] = path.split('/');
@@ -515,6 +531,7 @@
       if (recoveryMode) return viewSetPassword();
       if (!S.session) return viewLogin();
       if (!S.profile || !S.profile.active) return viewNoAccess();
+      if (isCustomer() && !CUSTOMER_ROUTES.includes(a) || isCustomer() && b === 'new') { location.replace('#/'); return; }
       if (!a) return isLift() ? viewDockHome() : viewHome();
       if (a === 'dock') {
         if (!canDock()) { location.hash = '#/'; return; }
@@ -741,7 +758,8 @@
     render(`
       <div id="dash">
         <div class="dash-head">
-          <div><h1 style="margin-bottom:2px">${esc(companyName())}</h1>
+          <div><h1 style="margin-bottom:2px">${esc(isCustomer() ? (ownerById(S.profile.owner_id).name || companyName()) : companyName())}</h1>
+            ${isCustomer() ? `<div class="muted small">Inventory at ${esc(companyName())}</div>` : ''}
             <div class="muted small">${scopeTxt} &middot; ${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div></div>
           <div class="dash-filters">
             ${multiOwner() ? `<select id="dash-acct" aria-label="Account"><option value="">All accounts</option>${acctOptions(acct, allWh)}</select>` : ''}
@@ -751,10 +769,11 @@
 
         <div class="tiles home-tiles">
           <a class="tile" href="#/schedule"><strong>Schedule</strong><span>${inToday} in &middot; ${outToday} out today</span></a>
-          <a class="tile" href="#/receipts"><strong>Receiving</strong><span>${D.openR.length ? `${D.openR.length} open receipt${D.openR.length === 1 ? '' : 's'}` : 'Receive pallets, print labels'}</span></a>
+          ${isCustomer() ? `<a class="tile" href="#/history"><strong>Pallet History</strong><span>Any pallet's full record, shipped ones too</span></a>` : ''}
+          <a class="tile" href="#/receipts"><strong>${isCustomer() ? 'Receipts' : 'Receiving'}</strong><span>${D.openR.length ? `${D.openR.length} open receipt${D.openR.length === 1 ? '' : 's'}` : isCustomer() ? 'Your inbound loads' : 'Receive pallets, print labels'}</span></a>
           <a class="tile" href="#/inventory"><strong>Inventory</strong><span>Filter by item, ${esc(lbl.lotShort().toLowerCase())}, location; print and export</span></a>
           <a class="tile" href="#/lookup"><strong>Inventory Lookup</strong><span>Scan or search pallets</span></a>
-          <a class="tile" href="#/shipments"><strong>Shipping</strong><span>${D.openS.length ? `${D.openS.length} open shipment${D.openS.length === 1 ? '' : 's'}` : 'Load pallets, print BOLs'}</span></a>
+          <a class="tile" href="#/shipments"><strong>${isCustomer() ? 'Shipments' : 'Shipping'}</strong><span>${D.openS.length ? `${D.openS.length} open shipment${D.openS.length === 1 ? '' : 's'}` : isCustomer() ? 'Your outbound loads and BOLs' : 'Load pallets, print BOLs'}</span></a>
           <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
           ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
           ${can('manager') ? `<a class="tile" href="#/billing"><strong>Billing</strong><span>Rates, extra charges, monthly statements</span></a>` : ''}
@@ -986,7 +1005,7 @@
       </table></div>`;
     render(`
       <a class="back" href="#/">&larr; Home</a>
-      <div class="row spread"><h1>Receiving${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
+      <div class="row spread"><h1>${isCustomer() ? "Receipts" : "Receiving"}${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
         ${can('operator') ? `<a class="btn" href="#/receipt/new">New Receipt</a>` : ''}</div>
       <h2>Open</h2>
       ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open receipts.</p>`}
@@ -1259,7 +1278,8 @@
         </div>` : `
         <div class="btn-row">
           <button class="btn dark" id="print-rcpt" ${active.length ? '' : 'disabled'}>Print Receipt</button>
-          <button class="btn secondary" id="print-all" ${active.length ? '' : 'disabled'}>Print All Labels</button>
+          ${isCustomer() ? '' : `<button class="btn secondary" id="print-all" ${active.length ? '' : 'disabled'}>Print All Labels</button>`}
+          ${rcpt.status === 'closed' && can('operator') && ownerById(rcpt.owner_id).email_to && active.length ? `<button class="btn secondary" id="email-rcpt">Email Receipt</button>` : ''}
           ${isOpen && can('operator') ? `<button class="btn secondary" id="print-unload">Print Unload Sheet</button>` : ''}
           ${isOpen && can('operator') ? `<button class="btn" id="close-rcpt">Close Receipt</button>` : ''}
           ${rcpt.status === 'closed' && can('manager') ? `<button class="btn secondary" id="reopen-rcpt">Reopen</button>` : ''}
@@ -1390,6 +1410,10 @@
     });
 
     /* receipt actions */
+    $('#email-rcpt', page)?.addEventListener('click', e => busy(e.target, async () => {
+      await q(sb.rpc('wms_email_document', { p_kind: 'receipt', p_ref: id }));
+      toast(`Receipt queued to ${ownerById(rcpt.owner_id).email_to}. It goes out within a few minutes.`);
+    }));
     $('#print-rcpt', page)?.addEventListener('click', () =>
       WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id), billToOf(rcpt.owner_id)));
     $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id)));
@@ -2529,7 +2553,7 @@
       </table></div>`;
     render(`
       <a class="back" href="#/">&larr; Home</a>
-      <div class="row spread"><h1>Shipping${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
+      <div class="row spread"><h1>${isCustomer() ? "Shipments" : "Shipping"}${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
         ${can('operator') ? `<a class="btn" href="#/shipment/new">New Shipment</a>` : ''}</div>
       <h2>Open</h2>
       ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open shipments.</p>`}
@@ -2798,6 +2822,7 @@
         <div class="btn-row">
           ${isOpen ? `<button class="btn secondary" id="print-load">Print Load Sheet</button>` : ''}
           <button class="btn dark" id="print-bol" ${lines.length ? '' : 'disabled'}>Print BOL</button>
+          ${ship.status === 'shipped' && can('operator') && ownerById(ship.owner_id).email_to ? `<button class="btn secondary" id="email-bol">Email BOL</button>` : ''}
           ${editable ? `<button class="btn" id="ship-btn" ${lines.length ? '' : 'disabled'}>Ship</button>` : ''}
           ${ship.status !== 'void' && can('manager') ? `<button class="btn danger" id="void-ship">Void Shipment</button>` : ''}
         </div>
@@ -2872,6 +2897,10 @@
       toast('Pallet removed.');
     }));
 
+    $('#email-bol', page)?.addEventListener('click', e => busy(e.target, async () => {
+      await q(sb.rpc('wms_email_document', { p_kind: 'bol', p_ref: id }));
+      toast(`BOL queued to ${ownerById(ship.owner_id).email_to}. It goes out within a few minutes.`);
+    }));
     $('#print-bol', page).onclick = () => WmsPrint.bol(ship, lines, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id), billToOf(ship.owner_id));
     $('#print-load', page)?.addEventListener('click', () => WmsPrint.loadSheet(ship, orders, docSettings(ship.warehouse_id, ship.owner_id), ownerById(ship.owner_id)));
 
@@ -2973,7 +3002,8 @@
     manager: 'Office + setup, adjustments, voids; manages operator, lift and viewer logins',
     operator: 'Office: receipts, shipments, order lines, ship and close',
     lift: 'Dock Mode only: unload, load, move, look up',
-    viewer: 'Look up inventory and paperwork, run reports'
+    viewer: 'Look up inventory and paperwork, run reports',
+    customer: 'Customer portal: sees only its account (a bill-to master also sees its subs): inventory, pallet history, receipts and BOLs. Read-only.'
   };
 
   async function setupUsers(out) {
@@ -2990,7 +3020,7 @@
       ${users.map(u => `
         <a class="list-item" href="#" data-user="${u.id}" style="${u.active ? '' : 'opacity:.55'}">
           <div class="row spread"><span class="title">${esc(u.full_name)}</span>
-            <span>${u.active ? '' : badge('inactive') + ' '}<span class="badge">${esc(u.role)}</span></span></div>
+            <span>${u.active ? '' : badge('inactive') + ' '}<span class="badge">${esc(u.role)}${u.role === 'customer' && u.owner_id ? ' &middot; ' + esc(ownerById(u.owner_id).code || '') : ''}</span></span></div>
           <div class="meta">Sign in: <strong>${esc(u.login)}</strong></div>
           <div class="meta">${u.last_sign_in_at ? 'Last signed in ' + esc(fmtDateTime(u.last_sign_in_at)) : 'Never signed in'}
             ${u.id === S.profile?.id ? ' &middot; you' : ''}</div>
@@ -3021,6 +3051,9 @@
         <div class="field"><label for="u-role">Role</label>
           <select id="u-role">${roles.map(r => `<option value="${r}" ${(u?.role || 'lift') === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
           <div class="hint" id="u-role-help"></div></div>
+        <div class="field" id="u-acct-f"><label for="u-acct">Customer account</label>
+          <select id="u-acct"><option value="">Select account...</option>${activeOwners().map(o => `<option value="${o.id}" ${u?.owner_id === o.id ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}${subsOf(o.id).length ? ' (+ ' + subsOf(o.id).length + ' sub)' : ''}</option>`).join('')}</select>
+          <div class="hint">Use their email as the login so they can reset their own password.</div></div>
         ${isNew ? `
         <div class="field"><label for="u-pw">Temporary password</label>
           <div class="input-scan"><input id="u-pw" value="${makePassword()}" required minlength="6" maxlength="72" autocapitalize="none" spellcheck="false">
@@ -3036,16 +3069,18 @@
         <div class="hint">Give the new password to ${esc(u.full_name)}.</div>
       </form>`}`);
     const roleSel = $('#u-role', body);
-    const help = () => { $('#u-role-help', body).textContent = ROLE_HELP[roleSel.value] || ''; };
+    const help = () => { $('#u-role-help', body).textContent = ROLE_HELP[roleSel.value] || ''; $('#u-acct-f', body).hidden = roleSel.value !== 'customer'; };
     roleSel.onchange = help; help();
     $('#u-gen', body)?.addEventListener('click', () => { $('#u-pw', body).value = makePassword(); });
 
     $('#user-form', body).onsubmit = e => {
       e.preventDefault();
       busy($('#u-save', body), async () => {
+        const ownerId = roleSel.value === 'customer' ? $('#u-acct', body).value || null : null;
+        if (roleSel.value === 'customer' && !ownerId) throw new Error('Pick the customer account this login can see.');
         if (isNew) {
           const pw = $('#u-pw', body).value;
-          const r = await callAdminUsers({ action: 'create', full_name: $('#u-name', body).value, login: $('#u-login', body).value, role: roleSel.value, password: pw });
+          const r = await callAdminUsers({ action: 'create', full_name: $('#u-name', body).value, login: $('#u-login', body).value, role: roleSel.value, owner_id: ownerId, password: pw });
           openModal('Login created', `
             <p>Give these to <strong>${esc(r.full_name)}</strong>:</p>
             <dl class="kv" style="font-size:20px"><dt>Sign in</dt><dd>${esc(r.login)}</dd><dt>Password</dt><dd style="font-family:monospace">${esc(pw)}</dd></dl>
@@ -3053,7 +3088,7 @@
             <button class="btn block" id="u-done">Done</button>`);
           $('#u-done').onclick = () => { closeModal(); viewSetup('users'); };
         } else {
-          await callAdminUsers({ action: 'update', id: u.id, full_name: $('#u-name', body).value, role: roleSel.value, active: $('#u-active', body).checked });
+          await callAdminUsers({ action: 'update', id: u.id, full_name: $('#u-name', body).value, role: roleSel.value, owner_id: ownerId, active: $('#u-active', body).checked });
           toast(`${$('#u-name', body).value} saved.`);
           closeModal(); viewSetup('users');
         }
@@ -4454,10 +4489,35 @@
           </select>
           <div class="hint">Names and rules for Customer Pallet ID and Unique2–8 on this account's pallets, labels and imports.</div></div>
         <div id="a-ids" class="grid2" ${r.id_rules ? '' : 'hidden'}>${idEditorHtml('a', r.id_rules || idSettings(r.id || null))}</div>
+        ${!o || 'email_to' in r ? `
+        <div class="field"><label for="a-emails">Email to <span class="muted small">(comma separated)</span></label>
+          <input id="a-emails" value="${esc(r.email_to || '')}" maxlength="500" placeholder="shipping@customer.com, buyer@customer.com">
+          <div class="row" style="margin-top:6px;flex-wrap:wrap">
+            <label class="check"><input type="checkbox" id="a-ebol" ${r.email_bol ? 'checked' : ''}> BOL when a load ships</label>
+            <label class="check"><input type="checkbox" id="a-ercpt" ${r.email_receipt ? 'checked' : ''}> Receipt when a receipt closes</label>
+            <label class="check"><input type="checkbox" id="a-edaily" ${r.email_daily ? 'checked' : ''}> Daily inventory (morning)</label>
+          </div>
+          ${o ? `<div class="row" style="margin-top:6px"><button type="button" class="btn sm secondary" id="a-etest">Send test email</button></div>
+          <div id="a-elog" class="small" style="margin-top:8px"></div>` : ''}</div>` : ''}
         <div class="field"><label class="check"><input type="checkbox" id="a-active" ${r.active ? 'checked' : ''}> Active</label></div>
         <button class="btn block" id="acct-save">${o ? 'Save' : 'Add Account'}</button>
       </form>`);
     $('#a-idmode', body).onchange = () => { $('#a-ids', body).hidden = $('#a-idmode', body).value !== 'own'; };
+    if (o && $('#a-elog', body)) {
+      const drawLog = async () => {
+        const rows = await q(sb.from('email_outbox').select('id, kind, subject, to_addr, status, error, created_at, sent_at').eq('owner_id', o.id).order('id', { ascending: false }).limit(8)).catch(() => []);
+        if (!body.isConnected) return;
+        $('#a-elog', body).innerHTML = rows.length ? `<strong>Recent emails</strong>${rows.map(e => `<div class="meta">${esc(fmtDateTime(e.created_at))} &middot; ${esc(e.subject)} &middot;
+          <span style="color:var(${e.status === 'sent' ? '--ok' : e.status === 'error' ? '--bad' : '--muted'})">${esc(e.status === 'queued' ? 'waiting to send' : e.status)}</span>${e.error ? ' &middot; ' + esc(e.error) : ''}</div>`).join('')}` : '<span class="muted">No emails yet.</span>';
+      };
+      drawLog();
+      $('#a-etest', body).onclick = () => busy($('#a-etest', body), async () => {
+        if (($('#a-emails', body).value.trim() || '') !== (o.email_to || '')) throw new Error('Save the email address first, then send the test.');
+        await q(sb.rpc('wms_email_test', { p_owner: o.id }));
+        toast('Test email queued. It goes out within a few minutes.');
+        drawLog();
+      });
+    }
     $('#acct-form', body).onsubmit = e => {
       e.preventDefault();
       busy($('#acct-save', body), async () => {
@@ -4467,7 +4527,9 @@
           phone: strOrNull($('#a-phone', body).value), billing_address: strOrNull($('#a-bill', body).value),
           notes: strOrNull($('#a-notes', body).value), active: $('#a-active', body).checked,
           ...(!$('#a-billto', body).disabled ? { bill_to_id: $('#a-billto', body).value || null } : {}),
-          ...('id_rules' in r || $('#a-idmode', body).value === 'own' ? { id_rules: $('#a-idmode', body).value === 'own' ? idEditorRead('a', body) : null } : {})
+          ...('id_rules' in r || $('#a-idmode', body).value === 'own' ? { id_rules: $('#a-idmode', body).value === 'own' ? idEditorRead('a', body) : null } : {}),
+          ...($('#a-emails', body) ? { email_to: strOrNull($('#a-emails', body).value.replace(/[;\s]+/g, ',').replace(/,+/g, ', ').replace(/^, |, $/g, '')),
+            email_bol: $('#a-ebol', body).checked, email_receipt: $('#a-ercpt', body).checked, email_daily: $('#a-edaily', body).checked } : {})
         };
         if (o) await q(sb.from('owners').update(row).eq('id', o.id));
         else await q(sb.from('owners').insert(row));

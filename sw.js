@@ -1,7 +1,7 @@
 // Service worker: caches the app shell so it opens fast and installs as an app.
 // App files are network-first (updates show up right away); data calls to
 // Supabase are never cached.
-const CACHE = 'lwh-wms-v1.5.1';
+const CACHE = 'lwh-wms-v1.6.0';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/config.js', 'js/print.js', 'js/app.js',
   'manifest.json', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'

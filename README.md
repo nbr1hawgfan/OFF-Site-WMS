@@ -3,6 +3,23 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.6.0 customer portal + automatic emails** (migration 016, admin-users function update):
+- **Customer logins:** Setup > Users > role "customer" + the account. They
+  sign in at the same address and see only that account (a bill-to master
+  also sees its subs):
+  - **What they get:** dashboard, inventory, lookup, Pallet History, receipts,
+    shipments/BOLs, schedule, lot trace and exports.
+  - **Read-only, enforced by the database** (customer-only read policies; staff
+    policies never apply to them).
+- **Emails** (Setup > Accounts > edit): "Email to" addresses plus switches for
+  BOL when a load ships, receipt when one closes, and a daily inventory each
+  morning (with a CSV of every pallet).
+  - **Extra buttons:** "Send test email", a recent-email log, and
+    Email BOL / Email Receipt buttons on shipped loads and closed receipts.
+  - **How they're sent:** emails queue in `email_outbox`. The Google Apps
+    Script in `tools/email-sender/Code.gs` sends them every 5 minutes and queues
+    the daily inventory at 6 AM (setup steps are at the top of that file).
+
 **v1.5.1 full history export** (Reports, managers): one Excel workbook with
 every pallet (any status), every transaction, receipts, shipments and their
 pallets, charges, rates, items, accounts, locations and ship-tos, plus an About
@@ -191,7 +208,7 @@ sheet with row counts. Meant as a monthly off-site copy of the records.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–015 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–016 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files

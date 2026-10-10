@@ -2,10 +2,10 @@
 // Used by the admin-users Edge Function (Deno) and by the local test harness (Node),
 // so the permission rules that are tested are exactly the ones that run.
 
-export const ROLES = ['admin', 'manager', 'operator', 'lift', 'viewer'];
-const RANK = { viewer: 1, lift: 1.5, operator: 2, manager: 3, admin: 4 };
+export const ROLES = ['admin', 'manager', 'operator', 'lift', 'viewer', 'customer'];
+const RANK = { customer: 0.5, viewer: 1, lift: 1.5, operator: 2, manager: 3, admin: 4 };
 // roles a manager may hand out / manage
-const MANAGER_CAN_MANAGE = ['operator', 'lift', 'viewer'];
+const MANAGER_CAN_MANAGE = ['operator', 'lift', 'viewer', 'customer'];
 
 export const LOGIN_DOMAIN = 'wms.logistics-warehouse.com';
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,29}$/;
@@ -71,7 +71,7 @@ export async function handle(body, callerId, db) {
     return {
       users: rows
         .map(r => ({
-          id: r.id, full_name: r.full_name, role: r.role, active: r.active,
+          id: r.id, full_name: r.full_name, role: r.role, active: r.active, owner_id: r.owner_id || null,
           login: r.login || info[r.id]?.email || '',
           last_sign_in_at: info[r.id]?.last_sign_in_at || null,
           can_manage: r.id !== caller.id && canManageRole(caller.role, r.role)
@@ -91,10 +91,12 @@ export async function handle(body, callerId, db) {
     const { login, email } = normalizeLogin(body.login);
     const password = checkPassword(body.password);
     if (await db.loginTaken(login)) throw bad(`${login} is already in use.`);
+    const ownerId = role === 'customer' ? String(body.owner_id || '') : null;
+    if (role === 'customer' && !ownerId) throw bad('Pick the customer account this login can see.');
 
     const id = await db.createAuthUser(email, password);
     try {
-      await db.insertAppUser({ id, full_name: fullName, role, login });
+      await db.insertAppUser({ id, full_name: fullName, role, login, owner_id: ownerId });
     } catch (e) {
       await db.deleteAuthUser(id).catch(() => {});   // don't leave a half-made login behind
       throw e;
@@ -131,6 +133,12 @@ export async function handle(body, callerId, db) {
       }
       patch.role = body.role;
     }
+    const newRole = patch.role || target.role;
+    if (newRole === 'customer') {
+      const o = body.owner_id !== undefined ? String(body.owner_id || '') : target.owner_id;
+      if (!o) throw bad('Pick the customer account this login can see.');
+      if (o !== target.owner_id) patch.owner_id = o;
+    } else if (target.owner_id) patch.owner_id = null;
     if (body.active !== undefined && !!body.active !== target.active) {
       if (self) throw bad('You cannot deactivate yourself.');
       if (!body.active && target.role === 'admin' && (await db.countActiveAdmins()) <= 1) {
