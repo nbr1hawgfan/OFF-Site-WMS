@@ -3,6 +3,33 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.7.0 photos, bay map, cycle counts** (migration 017):
+- **Load photos:** "Add Photo" on receipts, shipments and the Dock Mode
+  load/unload screens.
+  - **Taking them:** the phone camera opens, you tag each photo Damage / Seal /
+    Loaded trailer / Product / Other, and it's shrunk to about 100-250 KB before
+    upload.
+  - **Storage:** files go in a private `load-photos` storage bucket.
+  - **Viewing:** customers see their own loads' photos in the portal; Pallet
+    History shows photos from the loads a pallet was on. Tap a photo to add a
+    note; managers (or whoever took it, within an hour) can delete.
+- **Bay Map:** every bay as a tile, grouped by zone or code prefix, shaded by
+  Fullness (needs capacity), Age of the oldest pallet, or pallet count.
+  - **Bay detail:** tap a bay for its pallets.
+  - **Account highlight:** the account filter highlights one customer's bays.
+  - **Capacity setup:** Setup > Locations: "most bays hold N" per warehouse, a
+    bulk "bays starting with MR hold 2", or per bay.
+- **Cycle counts:**
+  1. **Start (manager):** Cycle Counts > New Count: pick aisles/zones or type
+     bays, optionally one account, blind or not.
+  2. **Count sheet:** print it (one block per bay with a QR).
+  3. **Scan (dock):** Dock Mode > Count: pick a bay, scan every pallet (qty if
+     partial), then "Bay Counted".
+  4. **Review:** the manager sees Match / In a different bay / Qty differs /
+     Not found / Label not in system.
+  5. **Approve:** checked fixes are posted as moves and adjustments with reason
+     "Cycle count CC-####", and the count's results are kept.
+
 **v1.6.0 customer portal + automatic emails** (migration 016, admin-users function update):
 - **Customer logins:** Setup > Users > role "customer" + the account. They
   sign in at the same address and see only that account (a bill-to master
@@ -208,7 +235,7 @@ sheet with row counts. Meant as a monthly off-site copy of the records.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–016 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–017 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files

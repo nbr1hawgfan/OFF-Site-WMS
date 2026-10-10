@@ -614,6 +614,35 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.4in;');
   }
 
+  /* cycle count sheet: one block per bay with its QR; expected pallets listed unless blind */
+  function countSheet(sess, bays, review, settings, o) {
+    const s = settings || {};
+    const html = sheetCss + `<style>
+        .cc-bay { border: 1.5pt solid #000; padding: 8pt; margin-bottom: 8pt; break-inside: avoid; page-break-inside: avoid; }
+        .cc-bay-head { display: flex; justify-content: space-between; align-items: center; }
+        .cc-bay-code { font-size: 22pt; font-weight: 800; }
+        .cc-bay table td { height: 18pt; font-size: 10pt; }
+        .cc-bay svg { width: .8in; height: .8in; }
+      </style>
+      <div class="ds">
+        <div class="ds-head">
+          <div><h1>COUNT SHEET</h1><div class="co">${esc((s.company_name || '').replace(/_/g, ' '))}${s.warehouse_code ? ' · ' + esc(s.warehouse_code) : ''}</div></div>
+          <div><div class="code">${esc(sess.count_no)}</div><div style="text-align:right">${esc(o.acct ? 'Account ' + o.acct : 'All accounts')} · ${review ? 'expected list' : 'blind count'}</div></div>
+        </div>
+        <p style="margin:0 0 8pt">Scan every pallet you find in each bay (Dock Mode &gt; Count), or write it below. Note damaged or unlabeled pallets.</p>
+        ${bays.map(b => {
+          const exp = review ? review.filter(r => r.system_location_id === b.location_id && r.result !== 'unknown') : [];
+          return `<div class="cc-bay"><div class="cc-bay-head"><div class="cc-bay-code">${esc(b.loc.code)}</div>${qrSvg(b.loc.code, 80)}</div>
+            <table><thead><tr><th>Pallet ID</th><th>SKU</th><th>${esc(o.lot || 'Lot')}</th><th class="num">Qty</th><th>Found?</th></tr></thead>
+            <tbody>${exp.map(r => `<tr><td>${esc(r.lp_id || '')}</td><td>${esc(r.sku || '')}</td><td>${esc(r.lot_number || '')}</td><td class="num">${esc(fmtQty(r.system_qty))}</td><td><span class="box"></span></td></tr>`).join('')}
+            ${'<tr><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(review ? 2 : 4)}</tbody></table>
+            <div style="margin-top:4pt;font-size:9pt">Counted by ________________ &nbsp; Time ________</div></div>`;
+        }).join('')}
+        <div class="foot">Printed ${esc(fmtDateTime(new Date()))}</div>
+      </div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.5in;');
+  }
+
   /* location / cycle-count report: pallets grouped by location, a QR per pallet */
   function locationReport(pallets, sub, settings) {
     const s = settings || {};
@@ -648,5 +677,5 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.4in;');
   }
 
-  return { labels, receipt, bol, loadSheet, unloadSheet, statement, table, locationReport, palletHistory };
+  return { labels, receipt, bol, loadSheet, unloadSheet, statement, table, locationReport, palletHistory, countSheet };
 })();

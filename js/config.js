@@ -4,7 +4,7 @@
 window.WMS_CONFIG = {
   SUPABASE_URL: 'https://ulclsqwgyvrqjalrmfhr.supabase.co',
   SUPABASE_KEY: 'sb_publishable_Q5VUijpPZXyQNWJdokDXVQ_PAKKcXcy',
-  APP_VERSION: '1.6.0',
+  APP_VERSION: '1.7.0',
   // usernames sign in as <username>@LOGIN_DOMAIN (must match the admin-users function)
   LOGIN_DOMAIN: 'wms.logistics-warehouse.com',
   // header / app-name branding (printed documents use Setup > Company)

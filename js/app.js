@@ -516,11 +516,12 @@
     if (!office) { nav.innerHTML = ''; return; }
     const cust = isCustomer();
     const items = cust ? [
-      ['', 'Dashboard', true, []], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['history', 'Pallet History', true, ['pallet']],
+      ['', 'Dashboard', true, []], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['map', 'Bay Map', true, []], ['history', 'Pallet History', true, ['pallet']],
       ['receipts', 'Receipts', true, ['receipt']], ['shipments', 'Shipments', true, ['shipment']], ['schedule', 'Schedule', true, []], ['reports', 'Reports', true, []]
     ] : [
       ['', 'Dashboard', true, []], ['schedule', 'Schedule', true, []], ['receipts', 'Receiving', true, ['receipt']],
-      ['shipments', 'Shipping', true, ['shipment']], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['reports', 'Reports', true, []],
+      ['shipments', 'Shipping', true, ['shipment']], ['inventory', 'Inventory', true, []], ['lookup', 'Lookup', true, []], ['map', 'Bay Map', true, []],
+      ['counts', 'Cycle Counts', true, ['count']], ['reports', 'Reports', true, []],
       ['billing', 'Billing', can('manager'), []], ['setup', 'Setup', can('manager'), []], ['dock', 'Dock Mode', can('operator'), []]
     ];
     nav.innerHTML = items.filter(n => n[2]).map(([k, label, , alias]) =>
@@ -534,10 +535,10 @@
   let resizeTimer;
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (document.getElementById('dash') && S.dashResize) S.dashResize(); }, 150); });
 
-  const CUSTOMER_ROUTES = ['', 'inventory', 'lookup', 'pallet', 'history', 'receipts', 'receipt', 'shipments', 'shipment', 'schedule', 'reports'];
+  const CUSTOMER_ROUTES = ['', 'inventory', 'lookup', 'map', 'pallet', 'history', 'receipts', 'receipt', 'shipments', 'shipment', 'schedule', 'reports'];
   async function route() {
     const path = location.hash.replace(/^#\/?/, '');
-    const [a, b, c] = path.split('/');
+    const [a, b, c, d] = path.split('/');
     navSeq++;
     setShell(a);
     if (!$('#modal').hidden) closeModal();
@@ -555,6 +556,8 @@
         if (b === 'unload' && c) return viewReceipt(c, null, true);
         if (b === 'unload') return viewDockReceipts();
         if (b === 'move') return viewDockMove();
+        if (b === 'count' && c) return viewDockCount(c, d);
+        if (b === 'count') return viewDockCounts();
         return viewDockHome();
       }
       if (a === 'receipts') return viewReceipts();
@@ -562,6 +565,9 @@
       if (a === 'receipt' && b) return viewReceipt(b);
       if (a === 'lookup') return viewLookup(decodeURIComponent(b || ''));
       if (a === 'pallet' && b) return viewPalletHistory(b);
+      if (a === 'map') return viewBayMap();
+      if (a === 'counts') return viewCounts();
+      if (a === 'count' && b) return viewCount(b);
       if (a === 'history') return viewHistorySearch(decodeURIComponent(b || ''));
       if (a === 'inventory') return viewInventory();
       if (a === 'schedule') return viewSchedule(b, c);
@@ -788,6 +794,8 @@
           <a class="tile" href="#/receipts"><strong>${isCustomer() ? 'Receipts' : 'Receiving'}</strong><span>${D.openR.length ? `${D.openR.length} open receipt${D.openR.length === 1 ? '' : 's'}` : isCustomer() ? 'Your inbound loads' : 'Receive pallets, print labels'}</span></a>
           <a class="tile" href="#/inventory"><strong>Inventory</strong><span>Filter by item, ${esc(lbl.lotShort().toLowerCase())}, location; print and export</span></a>
           <a class="tile" href="#/lookup"><strong>Inventory Lookup</strong><span>Scan or search pallets</span></a>
+          <a class="tile" href="#/map"><strong>Bay Map</strong><span>Every bay at a glance: how full, how old</span></a>
+          ${isCustomer() ? '' : `<a class="tile" href="#/counts"><strong>Cycle Counts</strong><span>Count bays, review differences, fix</span></a>`}
           <a class="tile" href="#/shipments"><strong>${isCustomer() ? 'Shipments' : 'Shipping'}</strong><span>${D.openS.length ? `${D.openS.length} open shipment${D.openS.length === 1 ? '' : 's'}` : isCustomer() ? 'Your outbound loads and BOLs' : 'Load pallets, print BOLs'}</span></a>
           <a class="tile" href="#/reports"><strong>Reports</strong><span>Export inventory and activity to Excel</span></a>
           ${can('operator') ? `<a class="tile" href="#/dock"><strong>Dock Mode</strong><span>The forklift screens: load, unload, move</span></a>` : ''}
@@ -1284,6 +1292,7 @@
           <div style="margin-top:12px">${pallets.length ? pallets.map(palletRow).join('') : '<p class="muted">No pallets yet.</p>'}</div>
         </div>
 
+        <div class="card" id="photos-card"></div>
         ${!dockMode && can('operator') && rcpt.status !== 'void' ? '<div class="card" id="charges-card"></div>' : ''}
 
         ${dockMode ? `
@@ -1307,6 +1316,7 @@
     if ($('#hdr-form', page)) wirePartiesBox($('#hdr-form', page), 'in', rcpt);
     const reload = fid => viewReceipt(id, fid, dockMode);
     wireCharges($('#charges-card', page), { receipt_id: id, owner_id: rcpt.owner_id, warehouse_id: rcpt.warehouse_id, carrier_by: rcpt.carrier_by });
+    photosCard($('#photos-card', page), { receipt_id: id, owner_id: rcpt.owner_id, canAdd: canDock() && !isCustomer() && rcpt.status !== 'void' });
 
     /* header save */
     $('#hdr-form', page)?.addEventListener('submit', e => {
@@ -1867,6 +1877,7 @@
               sh.pro_number && 'PRO ' + sh.pro_number, sh.customer_order_no && 'Order ' + sh.customer_order_no, sh.po_number && 'PO ' + sh.po_number].filter(Boolean).join(' · '))}</div>
           </div>`).join('') : '<p class="muted">Not on any load.</p>'}
       </div>
+      <div class="card" id="ph-photos" hidden></div>
       <div class="card">
         <h2>Every move <span class="muted small">(${txns.length} event${txns.length === 1 ? '' : 's'}, oldest first)</span></h2>
         <div class="table-wrap"><table class="data">
@@ -1882,6 +1893,21 @@
             <td class="small">${esc(h.reason || '')}</td></tr>`).join('')}</tbody>
         </table></div>
       </div>`);
+    // photos from the loads this pallet came in and went out on
+    (async () => {
+      const ors = [rcpt && `receipt_id.eq.${rcpt.id}`, ...ships.map(x => `shipment_id.eq.${x.id}`)].filter(Boolean);
+      if (!ors.length) return;
+      const rows = await q(sb.from('load_photos').select('*').or(ors.join(',')).order('created_at'));
+      const box = $('#ph-photos');
+      if (!rows.length || !box) return;
+      const urls = await signPhotos(rows).catch(() => ({}));
+      const docOf = r => r.receipt_id ? rcpt?.receipt_no : ships.find(x => x.id === r.shipment_id)?.shipment_no;
+      box.hidden = false;
+      box.innerHTML = `<h2>Photos from its loads <span class="muted small">(${rows.length})</span></h2><div class="ph-grid">${rows.map(r => `
+        <button type="button" class="ph-thumb" data-ph="${r.id}">${urls[r.path] ? `<img src="${esc(urls[r.path])}" alt="" loading="lazy">` : ''}
+          <span class="ph-tag ${r.kind === 'damage' ? 'bad' : ''}">${esc(docOf(r) || '')} · ${esc(PHOTO_KINDS[r.kind] || r.kind)}</span></button>`).join('')}</div>`;
+      $$('[data-ph]', box).forEach(b => b.onclick = () => photoModal(rows.find(r => r.id === b.dataset.ph), urls, () => viewPalletHistory(id)));
+    })().catch(() => {});
     const rowsFor = () => txns.map(h => [fmtDateTime(h.created_at), EVENT_NAMES[h.txn_type] || h.txn_type, whereText(h),
       Number(h.qty_change) ? fmtQty(h.qty_change) : '', fmtQty(h.qty_after), h.shipment_no || h.receipt_no || '', h.user_name || '', h.reason || '']);
     $('#ph-print').onclick = () => WmsPrint.palletHistory(H, rowsFor(), { ...docSettings(rcpt?.warehouse_id || S.whId, item.owner_id) },
@@ -1889,6 +1915,444 @@
     $('#ph-csv').onclick = () => downloadCsv(`pallet-history-${p.lp_id}.csv`,
       ['WMS Pallet ID', ...idFields(item.owner_id).map(f => f.label), 'SKU', lbl.lotShort(), 'When', 'Event', 'Where', 'Qty Change', 'Qty After', 'Ref', 'By', 'Reason'],
       rowsFor().map(r => [p.lp_id, ...idFields(item.owner_id).map(f => p[f.field] || ''), item.sku, p.lot_number || '', ...r]));
+  }
+
+  /* ================================================================== */
+  /* LOAD PHOTOS: phone pictures on a receipt or shipment                 */
+  /* ================================================================== */
+  const PHOTO_KINDS = { damage: 'Damage', seal: 'Seal', loaded: 'Loaded trailer', product: 'Product', other: 'Other' };
+  const PHOTO_BUCKET = 'load-photos';
+  // phone photos are 3-8 MB; shrink to ~1600 px JPEG (~250 KB) before upload
+  async function shrinkImage(file, max = 1600, quality = 0.72) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error(`Could not read ${file.name || 'that picture'}.`)); i.src = url; });
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', quality));
+      if (!blob) throw new Error('Could not process that picture.');
+      return blob;
+    } finally { URL.revokeObjectURL(url); }
+  }
+  async function signPhotos(rows) {
+    if (!rows.length) return {};
+    const { data, error } = await sb.storage.from(PHOTO_BUCKET).createSignedUrls(rows.map(r => r.path), 3600);
+    if (error) throw error;
+    return Object.fromEntries((data || []).filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
+  }
+  // ctx: { receipt_id | shipment_id, owner_id, canAdd, title? }
+  async function photosCard(card, ctx) {
+    if (!card) return;
+    const col = ctx.receipt_id ? 'receipt_id' : 'shipment_id', docId = ctx.receipt_id || ctx.shipment_id;
+    const draw = async () => {
+      const rows = await q(sb.from('load_photos').select('*').eq(col, docId).order('created_at'));
+      const urls = await signPhotos(rows).catch(() => ({}));
+      if (!card.isConnected) return;
+      card.innerHTML = `
+        <div class="row spread"><h2 style="margin:0">${esc(ctx.title || 'Photos')} ${rows.length ? `<span class="muted small">(${rows.length})</span>` : ''}</h2>
+          ${ctx.canAdd ? `<div class="row" style="gap:6px">
+            <select id="ph-kind" aria-label="Photo type">${Object.entries(PHOTO_KINDS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+            <label class="btn sm" id="ph-add">Add Photo<input type="file" accept="image/*" capture="environment" multiple hidden id="ph-file"></label></div>` : ''}</div>
+        ${rows.length ? `<div class="ph-grid">${rows.map(r => `
+          <button type="button" class="ph-thumb" data-ph="${r.id}">${urls[r.path] ? `<img src="${esc(urls[r.path])}" alt="${esc(PHOTO_KINDS[r.kind] || 'Photo')}" loading="lazy">` : '<span class="ph-missing">?</span>'}
+            <span class="ph-tag ${r.kind === 'damage' ? 'bad' : ''}">${esc(PHOTO_KINDS[r.kind] || r.kind)}</span></button>`).join('')}</div>`
+        : `<p class="muted" style="margin:8px 0 0">${ctx.canAdd ? 'No photos yet. Snap damage, the seal, or the loaded trailer: they stay with this load.' : 'No photos on this load.'}</p>`}`;
+      $('#ph-file', card)?.addEventListener('change', e => {
+        const files = [...e.target.files]; e.target.value = '';
+        if (!files.length) return;
+        const kind = $('#ph-kind', card).value;
+        busy($('#ph-add', card), async () => {
+          let n = 0;
+          for (const f of files) {
+            const blob = await shrinkImage(f);
+            const path = `${ctx.owner_id}/${ctx.receipt_id ? 'r' : 's'}/${docId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+            const up = await sb.storage.from(PHOTO_BUCKET).upload(path, await blob.arrayBuffer(), { contentType: 'image/jpeg' });
+            if (up.error) throw up.error;
+            try { await q(sb.from('load_photos').insert({ [col]: docId, owner_id: ctx.owner_id, path, kind })); }
+            catch (err) { await sb.storage.from(PHOTO_BUCKET).remove([path]).catch(() => {}); throw err; }
+            n++;
+          }
+          toast(`${n} photo${n === 1 ? '' : 's'} added.`);
+          await draw();
+        });
+      });
+      $$('[data-ph]', card).forEach(b => b.onclick = () => photoModal(rows.find(r => r.id === b.dataset.ph), urls, draw));
+    };
+    await draw().catch(e => { if (card.isConnected) card.innerHTML = `<div class="notice bad">Photos: ${esc(friendly(e))}</div>`; });
+  }
+  function photoModal(r, urls, after) {
+    const mine = r.created_by === S.profile?.id && Date.now() - new Date(r.created_at).getTime() < 3600e3;
+    const canDel = !isCustomer() && (can('manager') || mine);
+    const body = openModal(PHOTO_KINDS[r.kind] || 'Photo', `
+      ${urls[r.path] ? `<a href="${esc(urls[r.path])}" target="_blank" rel="noopener"><img src="${esc(urls[r.path])}" alt="" class="ph-full"></a>` : '<p class="muted">Picture not available.</p>'}
+      <p class="muted small">${esc(fmtDateTime(r.created_at))}${userName(r.created_by) ? ' &middot; ' + esc(userName(r.created_by)) : ''}</p>
+      ${canDock() && !isCustomer() ? `<form id="ph-cap" class="row" style="gap:6px">
+          <input id="ph-cap-in" value="${esc(r.caption || '')}" maxlength="200" placeholder="Add a note (e.g. corner crushed, 2 cases)" style="flex:1">
+          <button class="btn sm secondary">Save</button></form>` : r.caption ? `<p>${esc(r.caption)}</p>` : ''}
+      ${canDel ? '<div class="btn-row"><button class="btn sm danger" id="ph-del" type="button">Delete photo</button></div>' : ''}`);
+    $('#ph-cap', body)?.addEventListener('submit', e => {
+      e.preventDefault();
+      busy(null, async () => { await q(sb.from('load_photos').update({ caption: strOrNull($('#ph-cap-in', body).value) }).eq('id', r.id)); toast('Note saved.'); closeModal(); after(); });
+    });
+    $('#ph-del', body)?.addEventListener('click', async () => {
+      if (!await askConfirm('Delete photo?', 'This removes the picture from the load.', 'Delete', true)) return;
+      busy(null, async () => {
+        await q(sb.from('load_photos').delete().eq('id', r.id));
+        await sb.storage.from(PHOTO_BUCKET).remove([r.path]).catch(() => {});
+        toast('Photo deleted.'); after();
+      });
+    });
+  }
+
+  /* ================================================================== */
+  /* BAY MAP: every location as a tile, shaded by how full or how old    */
+  /* ================================================================== */
+  // one-hue sequential ramp (light = little, dark = a lot) + a reserved status color for over capacity
+  const MAP_RAMP = ['#cde2fb', '#9ec5f4', '#5598e7', '#256abf', '#0d366b'];
+  const MAP_OVER = '#d03b3b';
+  const inkOn = bg => contrast(bg, '#111111') >= contrast(bg, '#ffffff') ? '#111111' : '#ffffff';
+  // "MR121" -> group "MR", "A-01-2" -> "A", zone wins when set
+  function bayGroup(l) {
+    if (l.zone) return l.zone.toUpperCase();
+    const m = String(l.code).toUpperCase().match(/^[A-Z]+/);
+    return m ? m[0] : '#';
+  }
+  const capOf = l => l.capacity || whById(l.warehouse_id).default_capacity || null;
+
+  async function viewBayMap() {
+    if (isLift()) { location.hash = '#/dock'; return; }
+    const mySeq = navSeq;
+    const pref = loadPref('mapView', { mode: 'fill', acct: '', types: 'storage' });
+    if (pref.acct && !ownerById(pref.acct).id) pref.acct = '';
+    if (!document.querySelector('#map-page')) render(`<div class="loading">Loading...</div>`);
+    const pallets = await fetchAll(() => sb.from('v_inventory')
+      .select('pallet_id, lp_id, item_id, sku, description, lot_number, qty_on_hand, uom, status, received_at, location_id, owner_id, owner_code, customer_pallet_id')
+      .eq('warehouse_id', S.whId).order('pallet_id'));
+    if (mySeq !== navSeq) return;
+    const locs = whLocations(S.whId).filter(l => pref.types === 'all' || l.loc_type === 'storage');
+    const byLoc = {};
+    for (const p of pallets) (byLoc[p.location_id] = byLoc[p.location_id] || []).push(p);
+    const hasCap = locs.some(capOf);
+    const mode = pref.mode === 'fill' && !hasCap ? 'count' : pref.mode;
+    const stat = l => {
+      const ps = byLoc[l.id] || [], mine = pref.acct ? ps.filter(p => p.owner_id === pref.acct) : ps;
+      const cap = capOf(l), n = ps.length, oldest = ps.length ? Math.max(...ps.map(p => daysOld(p.received_at))) : 0;
+      let step = -1, over = false;
+      if (n) {
+        if (mode === 'fill') { const f = n / cap; over = f > 1; step = over ? 5 : f >= 1 ? 4 : f > .75 ? 3 : f > .5 ? 2 : f > .25 ? 1 : 0; }
+        else if (mode === 'age') step = oldest > 180 ? 4 : oldest > 90 ? 3 : oldest > 60 ? 2 : oldest > 30 ? 1 : 0;
+        else step = n >= 20 ? 4 : n >= 10 ? 3 : n >= 5 ? 2 : n >= 2 ? 1 : 0;
+      }
+      return { l, ps, mine, n, cap, oldest, step, over, dim: pref.acct && !mine.length };
+    };
+    const tiles = locs.map(stat);
+    const groups = {};
+    for (const t of tiles) (groups[bayGroup(t.l)] = groups[bayGroup(t.l)] || []).push(t);
+    const groupKeys = Object.keys(groups).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    groupKeys.forEach(k => groups[k].sort((a, b) => a.l.code.localeCompare(b.l.code, undefined, { numeric: true })));
+    const used = tiles.filter(t => t.n).length, capTotal = tiles.reduce((a, t) => a + (t.cap || 0), 0), palletsIn = tiles.reduce((a, t) => a + t.n, 0);
+    const legend = mode === 'fill' ? ['Up to 25% full', '26-50%', '51-75%', '76-99%', 'Full'] : mode === 'age'
+      ? ['Oldest pallet 0-30 days', '31-60', '61-90', '91-180', '181+ days'] : ['1 pallet', '2-4', '5-9', '10-19', '20+'];
+    const tileHtml = t => {
+      const bg = t.step < 0 ? '' : t.over ? MAP_OVER : MAP_RAMP[t.step];
+      const style = bg ? `background:${bg};color:${inkOn(bg)};border-color:${bg}` : '';
+      const tip = `${t.l.code}: ${t.n} pallet${t.n === 1 ? '' : 's'}${t.cap ? ' of ' + t.cap : ''}${t.n ? ', oldest ' + t.oldest + ' days' : ''}`;
+      return `<button type="button" class="bay ${t.n ? '' : 'empty'} ${t.dim ? 'dim' : ''} ${pref.acct && t.mine.length ? 'hit' : ''}" data-bay="${t.l.id}" style="${style}" title="${esc(tip)}" aria-label="${esc(tip)}">
+        <span class="bay-code">${esc(t.l.code)}</span><span class="bay-n">${t.over ? '! ' : ''}${t.n}${t.cap ? '/' + t.cap : ''}</span></button>`;
+    };
+    render(`
+      <div id="map-page">
+        <div class="row spread"><h1>Bay Map${multiWh() ? ` <span class="wh-tag">${esc(whById(S.whId).code)}</span>` : ''}</h1>
+          <div class="row map-filters" style="gap:8px;flex-wrap:wrap">
+            <div class="seg">${[['fill', 'Fullness'], ['age', 'Age'], ['count', 'Pallets']].filter(([k]) => k !== 'fill' || hasCap)
+              .map(([k, v]) => `<a href="#" data-mode="${k}" class="${mode === k ? 'on' : ''}">${v}</a>`).join('')}</div>
+            ${multiOwner() ? `<select id="map-acct" aria-label="Highlight account"><option value="">All accounts</option>${acctOptions(pref.acct, false)}</select>` : ''}
+            <label class="check"><input type="checkbox" id="map-all" ${pref.types === 'all' ? 'checked' : ''}> Dock &amp; floor too</label>
+          </div></div>
+        <div class="kpis" style="margin-top:6px">
+          <div class="kpi"><div class="kpi-label">Bays in use</div><div class="kpi-value">${used} / ${tiles.length}</div><div class="kpi-sub">${tiles.length - used} empty</div></div>
+          <div class="kpi"><div class="kpi-label">Pallets in bays</div><div class="kpi-value">${palletsIn.toLocaleString()}</div><div class="kpi-sub">${pallets.length - palletsIn ? (pallets.length - palletsIn) + ' elsewhere' : '&nbsp;'}</div></div>
+          ${capTotal ? `<div class="kpi"><div class="kpi-label">Space used</div><div class="kpi-value">${Math.round(palletsIn / capTotal * 100)}%</div><div class="kpi-sub">${(capTotal - palletsIn).toLocaleString()} open positions</div></div>` : ''}
+          ${capTotal ? `<div class="kpi"><div class="kpi-label">Full or over</div><div class="kpi-value">${tiles.filter(t => t.cap && t.n >= t.cap).length}</div><div class="kpi-sub">${tiles.filter(t => t.over).length} over capacity</div></div>` : ''}
+        </div>
+        ${!hasCap && can('manager') && !isCustomer() ? `<div class="notice">Set how many pallets each bay holds in <a href="#/setup/locations">Setup &gt; Locations</a> to see how full the building is.</div>` : ''}
+        <div class="map-legend"><span class="sw empty"></span>Empty${legend.map((t, i) => `<span class="sw" style="background:${MAP_RAMP[i]}"></span>${esc(t)}`).join('')}
+          ${mode === 'fill' ? `<span class="sw" style="background:${MAP_OVER}"></span>! Over capacity` : ''}</div>
+        ${groupKeys.map(k => `<section class="bay-group"><h2>${esc(k)} <span class="muted small">${groups[k].filter(t => t.n).length}/${groups[k].length} in use</span></h2>
+          <div class="bays">${groups[k].map(tileHtml).join('')}</div></section>`).join('') || '<p class="muted">No locations set up in this warehouse.</p>'}
+      </div>`);
+    const save = () => { savePref('mapView', pref); viewBayMap(); };
+    $$('[data-mode]').forEach(a => a.onclick = e => { e.preventDefault(); pref.mode = a.dataset.mode; save(); });
+    $('#map-acct')?.addEventListener('change', e => { pref.acct = e.target.value; save(); });
+    $('#map-all').onchange = e => { pref.types = e.target.checked ? 'all' : 'storage'; save(); };
+    $$('[data-bay]').forEach(b => b.onclick = () => {
+      const t = tiles.find(x => x.l.id === b.dataset.bay);
+      const body = openModal(`${t.l.code}${t.cap ? ` — ${t.n} of ${t.cap} pallets` : ` — ${t.n} pallet${t.n === 1 ? '' : 's'}`}`, t.n ? `
+        <div class="table-wrap"><table class="data"><thead><tr><th>Pallet</th><th>SKU</th><th>${esc(lbl.lotShort())}</th><th class="num">Qty</th><th class="num">Days</th>${multiOwner() ? '<th>Account</th>' : ''}</tr></thead>
+        <tbody>${t.ps.slice().sort((a, b) => daysOld(b.received_at) - daysOld(a.received_at)).map(p => `<tr data-href="#/pallet/${p.pallet_id}" style="cursor:pointer">
+          <td><a href="#/pallet/${p.pallet_id}">${esc(p.lp_id)}</a>${p.customer_pallet_id ? `<div class="muted small">${esc(p.customer_pallet_id)}</div>` : ''}${p.status === 'hold' ? ' ' + badge('hold') : ''}</td>
+          <td>${esc(p.sku)}<div class="muted small">${esc(p.description)}</div></td><td>${esc(p.lot_number || '')}</td>
+          <td class="num">${esc(fmtQty(p.qty_on_hand))} ${esc(p.uom)}</td><td class="num">${daysOld(p.received_at)}</td>${multiOwner() ? `<td>${esc(p.owner_code || '')}</td>` : ''}</tr>`).join('')}</tbody></table></div>`
+        : '<p class="muted">Empty.</p>');
+      wireRowLinks(body);
+      $$('a', body).forEach(a => a.addEventListener('click', () => closeModal()));
+    });
+  }
+
+  /* ================================================================== */
+  /* CYCLE COUNTS                                                         */
+  /* ================================================================== */
+  const COUNT_RESULTS = {
+    match: ['Match', 'ok'], moved: ['In a different bay', 'warn'], qty: ['Qty differs', 'warn'], moved_qty: ['Different bay and qty', 'warn'],
+    missing: ['Not found', 'bad'], not_counted: ['Bay not counted yet', ''], unknown: ['Label not in system', 'bad'], not_in_stock: ['Found, but system says shipped/void', 'bad']
+  };
+  async function viewCounts() {
+    if (isLift() || isCustomer()) { location.hash = '#/'; return; }
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.from('count_sessions').select('*, count_bays(location_id, done_at), count_scans(count)').eq('warehouse_id', S.whId).order('created_at', { ascending: false }).limit(60));
+    if (mySeq !== navSeq) return;
+    const open = rows.filter(r => r.status === 'open'), done = rows.filter(r => r.status !== 'open');
+    const item = r => `<a class="list-item" href="#/count/${r.id}">
+      <div class="row spread"><span class="title">${esc(r.count_no)}${r.owner_id ? ' &middot; ' + esc(ownerById(r.owner_id).code || '') : ''}</span>${badge(r.status)}</div>
+      <div class="meta">${r.count_bays.length} bay${r.count_bays.length === 1 ? '' : 's'} &middot; ${r.count_bays.filter(b => b.done_at).length} done &middot; ${r.count_scans?.[0]?.count ?? 0} scanned
+        &middot; started ${esc(fmtDateTime(r.created_at))}${r.result ? ` &middot; ${r.result.moves} moves, ${r.result.adjustments} adjustments` : ''}</div>
+      ${r.notes ? `<div class="meta">${esc(r.notes)}</div>` : ''}</a>`;
+    render(`
+      <div class="row spread"><h1>Cycle Counts${multiWh() ? ` <span class="wh-tag">${esc(whById(S.whId).code)}</span>` : ''}</h1>
+        ${can('manager') ? '<button class="btn" id="cc-new">New Count</button>' : ''}</div>
+      <p class="muted">Pick some bays, the dock scans what's really there (Dock Mode &gt; Count), then a manager reviews the differences and approves the fixes. Counting a few bays every week keeps the whole building right without shutting down.</p>
+      <h2>Open</h2>${open.length ? open.map(item).join('') : '<p class="muted">No open counts.</p>'}
+      <h2>Finished</h2>${done.length ? done.map(item).join('') : '<p class="muted">None yet.</p>'}`);
+    $('#cc-new')?.addEventListener('click', () => countForm());
+  }
+
+  function countForm() {
+    const locs = whLocations(S.whId).filter(l => l.loc_type === 'storage');
+    const groups = {};
+    locs.forEach(l => (groups[bayGroup(l)] = groups[bayGroup(l)] || []).push(l));
+    const keys = Object.keys(groups).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const body = openModal('New Cycle Count', `
+      <form id="cc-form">
+        <p class="muted small" style="margin-top:0">${esc(whById(S.whId).code || '')}: pick whole aisles/zones, or type bays.</p>
+        <div class="cc-groups">${keys.map(k => `<label class="check"><input type="checkbox" data-grp="${esc(k)}"> ${esc(k)} <span class="muted small">(${groups[k].length})</span></label>`).join('')}</div>
+        <div class="field"><label for="cc-bays">Or these bays <span class="muted small">(comma separated, e.g. MR121, MR122, A01-A05 not supported)</span></label>
+          <input id="cc-bays" autocapitalize="characters" placeholder="MR121, MR122"></div>
+        ${multiOwner() ? `<div class="field"><label for="cc-acct">Only one account's pallets <span class="muted small">(optional)</span></label>
+          <select id="cc-acct"><option value="">All accounts</option>${acctOptions('', false)}</select></div>` : ''}
+        <label class="check"><input type="checkbox" id="cc-blind" checked> Blind count (the count sheet does not list what the system expects)</label>
+        <div class="field"><label for="cc-notes">Notes</label><input id="cc-notes" maxlength="200" placeholder="e.g. Monthly MR aisle count"></div>
+        <p id="cc-sum" class="muted"></p>
+        <button class="btn block" id="cc-go">Start Count</button>
+      </form>`);
+    const pick = () => {
+      const ids = new Set();
+      $$('[data-grp]', body).filter(c => c.checked).forEach(c => groups[c.dataset.grp].forEach(l => ids.add(l.id)));
+      const typed = $('#cc-bays', body).value.split(/[\s,;]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+      const bad = [];
+      typed.forEach(code => { const l = whLocations(S.whId).find(x => x.code.toUpperCase() === code); if (l) ids.add(l.id); else bad.push(code); });
+      return { ids: [...ids], bad };
+    };
+    const sum = () => { const p = pick(); $('#cc-sum', body).textContent = `${p.ids.length} bay${p.ids.length === 1 ? '' : 's'} selected${p.bad.length ? ` · not found: ${p.bad.join(', ')}` : ''}`; };
+    $$('input', body).forEach(i => i.addEventListener('input', sum)); sum();
+    $('#cc-form', body).onsubmit = e => {
+      e.preventDefault();
+      busy($('#cc-go', body), async () => {
+        const p = pick();
+        if (p.bad.length) throw new Error(`Not found in ${whById(S.whId).code}: ${p.bad.join(', ')}`);
+        if (!p.ids.length) throw new Error('Pick at least one bay.');
+        const s = await q(sb.rpc('wms_count_create', { p_warehouse_id: S.whId, p_location_ids: p.ids, p_owner_id: $('#cc-acct', body)?.value || null,
+          p_blind: $('#cc-blind', body).checked, p_notes: strOrNull($('#cc-notes', body).value) }));
+        closeModal();
+        toast(`${s.count_no} started: ${p.ids.length} bays.`);
+        location.hash = '#/count/' + s.id;
+      });
+    };
+  }
+
+  async function loadCount(id) {
+    const [s, bays, scans] = await Promise.all([
+      q(sb.from('count_sessions').select('*').eq('id', id).single()),
+      q(sb.from('count_bays').select('*').eq('session_id', id)),
+      q(sb.from('count_scans').select('*').eq('session_id', id).order('id'))
+    ]);
+    bays.forEach(b => { b.loc = locById(b.location_id); });
+    bays.sort((a, b) => String(a.loc.code).localeCompare(String(b.loc.code), undefined, { numeric: true }));
+    return { s, bays, scans };
+  }
+
+  async function viewCount(id) {
+    if (isLift() || isCustomer()) { location.hash = '#/dock/count/' + id; return; }
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const { s, bays, scans } = await loadCount(id);
+    const review = s.status === 'open' ? await q(sb.rpc('wms_count_review', { p_session_id: id })) : (s.result?.lines || []);
+    // a pallet "not found" in a bay nobody has counted yet is not a finding
+    review.forEach(r => { if (r.result === 'missing' && !r.bay_done) r.result = 'not_counted'; });
+    if (mySeq !== navSeq) return;
+    const isOpen = s.status === 'open';
+    const done = bays.filter(b => b.done_at).length;
+    const counts = {};
+    review.forEach(r => { counts[r.result] = (counts[r.result] || 0) + 1; });
+    const issues = review.filter(r => !['match', 'not_counted'].includes(r.result));
+    const counted = review.filter(r => r.result !== 'not_counted').length;
+    const fixFor = r => r.result === 'moved' ? 'Move to ' + r.counted_location : r.result === 'qty' ? `Set qty to ${fmtQty(r.counted_qty)}`
+      : r.result === 'moved_qty' ? `Move to ${r.counted_location}, qty ${fmtQty(r.counted_qty)}` : r.result === 'missing' ? 'Set qty to 0 (lost)' : '';
+    const approved = new Set((s.result?.approved || []).map(a => a.pallet_id));
+    render(`
+      <a class="back" href="#/counts">&larr; Cycle Counts</a>
+      <div class="row spread"><h1>${esc(s.count_no)} ${badge(s.status)}</h1>
+        <div class="btn-row" style="margin:0"><button class="btn secondary sm" id="cc-sheet">Print Count Sheet</button>
+          ${!isOpen ? '<button class="btn secondary sm" id="cc-report">Print Results</button>' : ''}
+          ${isOpen && can('operator') ? `<a class="btn sm" href="#/dock/count/${s.id}">Scan Bays</a>` : ''}</div></div>
+      <p class="muted">${esc(whById(s.warehouse_id).code || '')}${s.owner_id ? ' &middot; account ' + esc(ownerById(s.owner_id).code || '') : ' &middot; all accounts'}
+        &middot; ${s.blind ? 'blind' : 'with expected list'} &middot; started ${esc(fmtDateTime(s.created_at))}${userName(s.created_by) ? ' by ' + esc(userName(s.created_by)) : ''}
+        ${s.closed_at ? ` &middot; ${s.status === 'void' ? 'voided' : 'approved'} ${esc(fmtDateTime(s.closed_at))}${userName(s.closed_by) ? ' by ' + esc(userName(s.closed_by)) : ''}` : ''}${s.notes ? '<br>' + esc(s.notes) : ''}</p>
+      <div class="kpis">
+        <div class="kpi"><div class="kpi-label">Bays done</div><div class="kpi-value">${done} / ${bays.length}</div><div class="kpi-sub">${bays.length - done ? bays.length - done + ' to go' : 'all counted'}</div></div>
+        <div class="kpi"><div class="kpi-label">Pallets scanned</div><div class="kpi-value">${scans.length}</div><div class="kpi-sub">&nbsp;</div></div>
+        <div class="kpi"><div class="kpi-label">Matches</div><div class="kpi-value">${counts.match || 0}</div><div class="kpi-sub">${counted ? Math.round((counts.match || 0) / counted * 100) + '% accurate' : '&nbsp;'}</div></div>
+        <div class="kpi"><div class="kpi-label">Differences</div><div class="kpi-value">${issues.length}</div><div class="kpi-sub">${Object.entries(counts).filter(([k]) => !['match', 'not_counted'].includes(k)).map(([k, n]) => `${n} ${COUNT_RESULTS[k]?.[0].toLowerCase()}`).join(', ') || 'none'}</div></div>
+      </div>
+      ${isOpen && done < bays.length ? `<div class="notice warn">Not counted yet: ${esc(bays.filter(b => !b.done_at).map(b => b.loc.code).join(', '))}. Pallets in those bays show as "Not found" until they are scanned.</div>` : ''}
+      <div class="card">
+        <div class="row spread"><h2 style="margin:0">${isOpen ? 'Review' : 'Results'}</h2>
+          ${isOpen ? '<span class="muted small">Checked fixes are posted when you approve. Each one is logged with this count number.</span>' : ''}</div>
+        ${review.length ? `<div class="table-wrap" style="margin-top:10px"><table class="data cc-table">
+          <thead><tr>${isOpen && can('manager') ? '<th></th>' : ''}<th>Result</th><th>Pallet</th><th>SKU</th><th>${esc(lbl.lotShort())}</th><th>System</th><th>Counted</th><th>${isOpen ? 'Fix' : 'Fix posted'}</th></tr></thead>
+          <tbody>${review.map((r, i) => `<tr class="cc-${COUNT_RESULTS[r.result]?.[1] || ''}">
+            ${isOpen && can('manager') ? `<td>${fixFor(r) ? `<input type="checkbox" data-fix="${i}" ${['moved', 'qty', 'moved_qty'].includes(r.result) ? 'checked' : ''} aria-label="Apply fix">` : ''}</td>` : ''}
+            <td><strong>${esc(COUNT_RESULTS[r.result]?.[0] || r.result)}</strong></td>
+            <td>${r.pallet_id ? `<a href="#/pallet/${r.pallet_id}">${esc(r.lp_id)}</a>` : esc(r.code || '')}${r.code && r.lp_id && r.code !== r.lp_id ? `<div class="muted small">scanned ${esc(r.code)}</div>` : ''}</td>
+            <td>${esc(r.sku || '')}${multiOwner() && r.owner_code ? `<div class="muted small">${esc(r.owner_code)}</div>` : ''}</td><td>${esc(r.lot_number || '')}</td>
+            <td>${r.system_location ? esc(r.system_location) + ' &middot; ' + esc(fmtQty(r.system_qty)) : '-'}</td>
+            <td>${r.counted_location ? esc(r.counted_location) + (r.counted_qty != null ? ' &middot; ' + esc(fmtQty(r.counted_qty)) : '') : '-'}</td>
+            <td class="small">${isOpen ? esc(fixFor(r)) : approved.has(r.pallet_id) ? esc(fixFor(r)) : ''}</td></tr>`).join('')}</tbody></table></div>`
+          : '<p class="muted">Nothing expected and nothing scanned yet.</p>'}
+        ${isOpen && can('manager') ? `<div class="btn-row"><button class="btn" id="cc-apply">Approve &amp; Close</button><button class="btn ghost" id="cc-void">Void Count</button></div>` : ''}
+      </div>`);
+    $('#cc-sheet').onclick = () => WmsPrint.countSheet(s, bays, s.blind ? null : review, docSettings(s.warehouse_id), { lot: lbl.lotShort(), acct: s.owner_id ? ownerById(s.owner_id).code : '' });
+    $('#cc-report')?.addEventListener('click', () => WmsPrint.table(`Cycle count ${s.count_no}`, `${whById(s.warehouse_id).code || ''} · approved ${fmtDateTime(s.closed_at)}`,
+      [{ label: 'Result' }, { label: 'Pallet' }, { label: 'SKU' }, { label: lbl.lotShort() }, { label: 'System' }, { label: 'Counted' }, { label: 'Fix posted' }],
+      review.map(r => [COUNT_RESULTS[r.result]?.[0] || r.result, r.lp_id || r.code || '', r.sku || '', r.lot_number || '',
+        r.system_location ? `${r.system_location} · ${fmtQty(r.system_qty)}` : '-', r.counted_location ? `${r.counted_location} · ${fmtQty(r.counted_qty)}` : '-',
+        approved.has(r.pallet_id) ? fixFor(r) : '']), S.settings));
+    $('#cc-apply')?.addEventListener('click', async () => {
+      const picks = $$('[data-fix]').filter(c => c.checked).map(c => review[Number(c.dataset.fix)]);
+      const actions = picks.map(r => r.result === 'moved' ? { pallet_id: r.pallet_id, action: 'move', to_location_id: r.counted_location_id }
+        : r.result === 'qty' ? { pallet_id: r.pallet_id, action: 'adjust', qty: r.counted_qty }
+        : r.result === 'moved_qty' ? { pallet_id: r.pallet_id, action: 'move_adjust', to_location_id: r.counted_location_id, qty: r.counted_qty }
+        : { pallet_id: r.pallet_id, action: 'zero' });
+      const unchecked = issues.filter(r => fixFor(r)).length - picks.length;
+      if (!await askConfirm(`Approve ${s.count_no}?`, `${actions.length} fix${actions.length === 1 ? '' : 'es'} will be posted (moves and adjustments, reason "Cycle count ${esc(s.count_no)}").${unchecked ? `<br>${unchecked} difference${unchecked === 1 ? '' : 's'} left as is.` : ''}${done < bays.length ? `<br><strong>${bays.length - done} bay${bays.length - done === 1 ? ' is' : 's are'} not marked counted.</strong>` : ''}<br>The count then closes.`, 'Approve')) return;
+      busy($('#cc-apply'), async () => {
+        const r = await q(sb.rpc('wms_count_apply', { p_session_id: id, p_actions: actions }));
+        toast(`${s.count_no} closed: ${r.moves} moves, ${r.adjustments} adjustments.`);
+        viewCount(id);
+      });
+    });
+    $('#cc-void')?.addEventListener('click', async () => {
+      if (!await askConfirm(`Void ${s.count_no}?`, 'Nothing is changed in inventory.', 'Void', true)) return;
+      busy(null, async () => { await q(sb.rpc('wms_count_void', { p_session_id: id })); toast(`${s.count_no} voided.`); viewCount(id); });
+    });
+  }
+
+  // Dock Mode: pick a count, then a bay, then scan what's there
+  async function viewDockCounts() {
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const rows = await q(sb.from('count_sessions').select('*, count_bays(location_id, done_at)').eq('status', 'open').eq('warehouse_id', S.whId).order('created_at'));
+    if (mySeq !== navSeq) return;
+    if (rows.length === 1) { location.replace('#/dock/count/' + rows[0].id); return; }
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Count</h1>
+      ${rows.length ? rows.map(r => `<a class="list-item dock-item" href="#/dock/count/${r.id}">
+        <div class="row spread"><span class="title">${esc(r.count_no)}</span><span class="badge open">${r.count_bays.filter(b => b.done_at).length}/${r.count_bays.length} bays</span></div>
+        ${r.notes ? `<div class="meta">${esc(r.notes)}</div>` : ''}</a>`).join('')
+      : '<div class="notice">No counts open. A manager starts one in Cycle Counts.</div>'}`);
+  }
+
+  async function viewDockCount(id, bayId) {
+    const mySeq = navSeq;
+    if (!document.querySelector('#dock-count')) render(`<div class="loading">Loading...</div>`);
+    const { s, bays, scans } = await loadCount(id);
+    if (mySeq !== navSeq) return;
+    if (s.status !== 'open') { render(`<a class="back" href="#/dock">&larr; Dock</a><div class="notice">${esc(s.count_no)} is ${esc(s.status)}.</div>`); return; }
+    const bay = bays.find(b => b.location_id === bayId);
+    if (!bay) {
+      const next = bays.find(b => !b.done_at);
+      render(`
+        <div id="dock-count">
+        <a class="back" href="#/dock/count">&larr; Counts</a>
+        <div class="dock-head"><div class="dock-head-main">${esc(s.count_no)}</div>
+          <div>${bays.filter(b => b.done_at).length} of ${bays.length} bays counted${s.notes ? ' &middot; ' + esc(s.notes) : ''}</div></div>
+        <form id="cb-form" class="card accent" autocomplete="off">
+          <label for="cb">Scan or type the bay</label>
+          <div class="input-scan"><input id="cb" class="big-input" enterkeyhint="go" autocapitalize="characters" placeholder="${esc(next?.loc.code || '')}">${scanBtn('cb', 'cb-form')}</div>
+        </form>
+        ${flashHtml()}
+        <div class="bay-pick">${bays.map(b => `<a class="bay-chip ${b.done_at ? 'done' : ''}" href="#/dock/count/${id}/${b.location_id}">${esc(b.loc.code)}${b.done_at ? ' &#10003;' : ''}
+          <span>${scans.filter(x => x.location_id === b.location_id).length}</span></a>`).join('')}</div>
+        </div>`);
+      wireScanButtons($('#dock-count'));
+      setTimeout(() => $('#cb')?.focus(), 30);
+      $('#cb-form').onsubmit = e => {
+        e.preventDefault();
+        const code = $('#cb').value.trim().toUpperCase();
+        const b = bays.find(x => String(x.loc.code).toUpperCase() === code);
+        if (!b) { flash('bad', `${code || 'Blank'} is not in ${s.count_no}`); viewDockCount(id); return; }
+        location.hash = `#/dock/count/${id}/${b.location_id}`;
+      };
+      return;
+    }
+    const here = scans.filter(x => x.location_id === bayId);
+    render(`
+      <div id="dock-count">
+      <a class="back" href="#/dock/count/${id}">&larr; ${esc(s.count_no)} bays</a>
+      <div class="dock-head"><div class="dock-head-main">Bay ${esc(bay.loc.code)}</div>
+        <div>${here.length} pallet${here.length === 1 ? '' : 's'} scanned${bay.done_at ? ' &middot; <strong>marked counted</strong>' : ''}</div></div>
+      <form id="cs-form" class="card accent" autocomplete="off">
+        <label for="cs">Scan every pallet in this bay</label>
+        <input id="cs" class="big-input" enterkeyhint="go" autocomplete="off">
+        <div class="row" style="margin-top:8px;gap:8px">${scanBtn('cs', 'cs-form')}
+          <input id="cs-qty" type="number" inputmode="decimal" min="0" step="any" placeholder="Qty if partial" style="max-width:150px">
+          <button class="btn" id="cs-btn">Count</button></div>
+      </form>
+      ${flashHtml()}
+      <div class="card"><h2>In this bay</h2>
+        ${here.length ? here.slice().reverse().map(x => `<div class="list-item row spread"><div><span class="lp">${esc(x.code)}</span>
+          <div class="meta">${x.pallet_id ? '' : '<span style="color:var(--bad)">not in system</span> &middot; '}${x.qty != null ? 'qty ' + esc(fmtQty(x.qty)) : ''}</div></div>
+          <button class="btn sm ghost" data-unscan="${x.id}">Undo</button></div>`).join('') : '<p class="muted">Nothing scanned yet. Empty bay? Mark it counted.</p>'}
+      </div>
+      <button class="btn block" id="cb-done">${bay.done_at ? 'Counted &#10003; — next bay' : 'Bay Counted'}</button>
+      </div>`);
+    const page = $('#dock-count');
+    wireScanButtons(page);
+    setTimeout(() => $('#cs')?.focus(), 30);
+    $('#cs-form').onsubmit = e => {
+      e.preventDefault();
+      busy($('#cs-btn'), async () => {
+        const code = $('#cs').value.trim();
+        if (!code) return;
+        const qty = numOrNull($('#cs-qty').value);
+        const r = await q(sb.rpc('wms_count_scan', { p_session_id: id, p_location_id: bayId, p_code: code, p_qty: qty }));
+        if (r.result === 'here') flash('ok', `${r.lp_id} ✓`, `${r.sku} · ${r.lot || ''} · ${fmtQty(r.qty)} ${r.uom}${qty != null && Number(qty) !== Number(r.system_qty) ? ` (system ${fmtQty(r.system_qty)})` : ''}`);
+        else if (r.result === 'other_bay') flash('warn', `${r.lp_id}: system says ${r.system_location}`, `${r.sku} · counted here in ${bay.loc.code}. The manager will review it.`);
+        else if (r.result === 'not_in_stock') flash('bad', `${r.lp_id} is ${r.status} in the system`, 'Set it aside and tell the office.');
+        else flash('bad', `${r.code}: not in the system`, 'Noted for review. Check the label.');
+        viewDockCount(id, bayId);
+      });
+    };
+    $$('[data-unscan]', page).forEach(b => b.onclick = () => busy(b, async () => { await q(sb.rpc('wms_count_unscan', { p_scan_id: Number(b.dataset.unscan) })); viewDockCount(id, bayId); }));
+    $('#cb-done').onclick = () => busy($('#cb-done'), async () => {
+      if (!bay.done_at) await q(sb.rpc('wms_count_bay_done', { p_session_id: id, p_location_id: bayId, p_done: true }));
+      const next = bays.find(b => !b.done_at && b.location_id !== bayId);
+      flash('ok', `Bay ${bay.loc.code} counted`, next ? `Next: ${next.loc.code}` : 'All bays counted. The office will review.');
+      location.hash = next ? `#/dock/count/${id}/${next.location_id}` : `#/dock/count/${id}`;
+    });
   }
 
   async function palletModal(p, onChange) {
@@ -2197,7 +2661,7 @@
     render(`<div class="loading">Loading...</div>`);
     const countOpen = table => q(sb.from(table).select('id', { count: 'exact', head: true }).eq('status', 'open').eq('warehouse_id', S.whId)
       .then(r => ({ data: r.count, error: r.error })));
-    const [ships, rcpts] = await Promise.all([countOpen('shipments'), countOpen('receipts')]);
+    const [ships, rcpts, counts] = await Promise.all([countOpen('shipments'), countOpen('receipts'), countOpen('count_sessions').catch(() => 0)]);
     if (mySeq !== navSeq) return;
     render(`
       ${!isLift() ? '<a class="back" href="#/">&larr; Office</a>' : ''}
@@ -2207,7 +2671,8 @@
         <a class="dock-tile" href="#/dock/unload"><strong>Unload</strong><span>${rcpts} open receipt${rcpts === 1 ? '' : 's'}</span></a>
         <a class="dock-tile" href="#/dock/move"><strong>Move</strong><span>Put away / relocate</span></a>
         <a class="dock-tile" href="#/lookup"><strong>Lookup</strong><span>Find a pallet</span></a>
-        <a class="dock-tile wide" href="#/schedule"><strong>Schedule</strong><span>Today's trucks</span></a>
+        <a class="dock-tile" href="#/dock/count"><strong>Count</strong><span>${counts ? `${counts} open count${counts === 1 ? '' : 's'}` : 'Cycle counts'}</span></a>
+        <a class="dock-tile" href="#/schedule"><strong>Schedule</strong><span>Today's trucks</span></a>
       </div>
       <p class="muted small" style="margin-top:20px">Signed in as ${esc(S.profile.full_name)} (${esc(S.profile.role)}) &middot; v${esc(cfg.APP_VERSION)}</p>`);
   }
@@ -2307,11 +2772,13 @@
             </div>`).join('') || '<p class="muted">Nothing loaded yet.</p>'}</div>
         </div>
 
+        <div class="card" id="photos-card"></div>
         ${isOpen && !ship.loaded_at ? `<button class="btn block" id="done-load" ${lines.length ? '' : 'disabled'}>Done Loading</button>` : ''}
       </div>`);
 
     const page = $('#dock-load');
     wireScanButtons(page);
+    photosCard($('#photos-card', page), { shipment_id: id, owner_id: ship.owner_id, canAdd: ship.status !== 'void', title: 'Photos (seal, loaded trailer, damage)' });
     const reload = () => viewDockLoad(id);
     const input = $('#ld', page);
     if (input) setTimeout(() => input.focus(), 30);
@@ -2832,6 +3299,7 @@
           <div style="margin-top:12px">${lines.length ? lines.map(lineRow).join('') : '<p class="muted">No pallets yet. Scan a pallet to add it.</p>'}</div>
         </div>
 
+        <div class="card" id="photos-card"></div>
         ${can('operator') && ship.status !== 'void' ? '<div class="card" id="charges-card"></div>' : ''}
 
         <div class="btn-row">
@@ -2847,6 +3315,7 @@
     wireScanButtons(page);
     const reload = focus => viewShipment(id, focus);
     wireCharges($('#charges-card', page), { shipment_id: id, owner_id: ship.owner_id, warehouse_id: ship.warehouse_id, carrier_by: ship.carrier_by });
+    photosCard($('#photos-card', page), { shipment_id: id, owner_id: ship.owner_id, canAdd: canDock() && !isCustomer() && ship.status !== 'void' });
 
     const hdr = $('#ship-hdr', page);
     if (hdr) {
@@ -3882,6 +4351,18 @@
     const locs = S.locations.filter(l => l.warehouse_id === S.whId);
     out.innerHTML = `
       ${multiWh() ? `<div class="notice">Locations in <strong>${esc(whById(S.whId).code)} — ${esc(whById(S.whId).name)}</strong>. Switch warehouses in the header to manage the other building.</div>` : ''}
+      ${'default_capacity' in whById(S.whId) ? `<form id="cap-form" class="card">
+        <h2>Bay capacity <span class="muted small">(for the Bay Map)</span></h2>
+        <div class="grid2">
+          <div class="field"><label for="cap-def">Most bays hold <span class="muted small">(pallets)</span></label>
+            <input id="cap-def" type="number" inputmode="numeric" min="1" step="1" value="${esc(whById(S.whId).default_capacity ?? '')}" placeholder="e.g. 3"></div>
+          <div class="field"><label for="cap-pre">Except bays starting with</label>
+            <div class="row" style="gap:6px"><input id="cap-pre" maxlength="20" autocapitalize="characters" placeholder="MR" style="flex:1">
+              <input id="cap-n" type="number" inputmode="numeric" min="1" step="1" placeholder="pallets" style="width:110px"></div></div>
+        </div>
+        <button class="btn secondary block" id="cap-save">Save Capacity</button>
+        <div class="hint">Tap a location below to set one bay. A blank bay uses the "most bays" number.</div>
+      </form>` : ''}
       <form id="loc-form" class="card accent">
         <h2>Add Location</h2>
         <div class="grid2">
@@ -3897,8 +4378,8 @@
       </form>
       ${locs.map(l => `
         <div class="list-item row spread" style="${l.active ? '' : 'opacity:.55'}">
-          <div><span class="title">${esc(l.code)}</span>
-            <div class="meta">${esc(l.loc_type)}${l.zone ? ' &middot; ' + esc(l.zone) : ''}</div></div>
+          <div><a href="#" class="title" data-loc="${l.id}">${esc(l.code)}</a>
+            <div class="meta">${esc(l.loc_type)}${l.zone ? ' &middot; ' + esc(l.zone) : ''}${l.capacity ? ' &middot; holds ' + l.capacity : ''}</div></div>
           ${['DOCK', 'FLOOR', 'HOLD'].includes(l.code) ? '<span class="muted small">built-in</span>'
             : `<button class="btn sm ghost" data-toggle="${l.id}">${l.active ? 'Deactivate' : 'Activate'}</button>`}
         </div>`).join('')}`;
@@ -3914,6 +4395,40 @@
         viewSetup('locations');
       });
     };
+    $('#cap-form', out)?.addEventListener('submit', e => {
+      e.preventDefault();
+      busy($('#cap-save', out), async () => {
+        const def = numOrNull($('#cap-def', out).value), pre = $('#cap-pre', out).value.trim().toUpperCase(), n = numOrNull($('#cap-n', out).value);
+        await q(sb.from('warehouses').update({ default_capacity: def ? Math.round(def) : null }).eq('id', S.whId));
+        let msg = 'Default capacity saved.';
+        if (pre) {
+          if (!n) throw new Error(`How many pallets do ${pre} bays hold?`);
+          const hit = await q(sb.from('locations').update({ capacity: Math.round(n) }).eq('warehouse_id', S.whId).ilike('code', pre.replace(/[%_]/g, '') + '%').select('id'));
+          msg = `${hit.length} ${pre} bay${hit.length === 1 ? '' : 's'} set to ${Math.round(n)}.`;
+        }
+        toast(msg); viewSetup('locations');
+      });
+    });
+    $$('[data-loc]', out).forEach(a => a.onclick = e => {
+      e.preventDefault();
+      const l = S.locations.find(x => x.id === a.dataset.loc);
+      const body = openModal(`Location ${l.code}`, `<form id="lf">
+        <div class="grid2">
+          <div class="field"><label for="lf-cap">Holds <span class="muted small">(pallets, blank = default)</span></label><input id="lf-cap" type="number" inputmode="numeric" min="1" step="1" value="${esc(l.capacity ?? '')}"></div>
+          <div class="field"><label for="lf-zone">Zone <span class="muted small">(groups the Bay Map)</span></label><input id="lf-zone" value="${esc(l.zone || '')}" maxlength="30"></div>
+          <div class="field"><label for="lf-type">Type</label><select id="lf-type">${['storage', 'floor', 'staging', 'dock', 'hold'].map(t => `<option ${l.loc_type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+          <div class="field"><label for="lf-sort">Sort order</label><input id="lf-sort" type="number" inputmode="numeric" value="${esc(l.sort_order ?? 0)}"></div>
+        </div><button class="btn block" id="lf-save">Save</button></form>`);
+      $('#lf', body).onsubmit = ev => {
+        ev.preventDefault();
+        busy($('#lf-save', body), async () => {
+          const cap = numOrNull($('#lf-cap', body).value);
+          await q(sb.from('locations').update({ capacity: cap ? Math.round(cap) : null, zone: strOrNull($('#lf-zone', body).value),
+            loc_type: $('#lf-type', body).value, sort_order: Number($('#lf-sort', body).value) || 0 }).eq('id', l.id));
+          closeModal(); toast(`${l.code} saved.`); viewSetup('locations');
+        });
+      };
+    });
     $$('[data-toggle]', out).forEach(b => b.onclick = () => busy(b, async () => {
       const l = S.locations.find(x => x.id === b.dataset.toggle);
       await q(sb.from('locations').update({ active: !l.active }).eq('id', l.id));
