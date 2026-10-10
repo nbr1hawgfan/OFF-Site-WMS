@@ -343,13 +343,28 @@
     const a = hex.match(/\w\w/g).map(x => parseInt(x, 16)), b = other.match(/\w\w/g).map(x => parseInt(x, 16));
     return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('');
   }
+  // WCAG contrast ratio between two hex colors
+  function contrast(h1, h2) {
+    const lum = h => { const [r, g, b] = h.match(/\w\w/g).map(x => parseInt(x, 16) / 255).map(c => c <= .03928 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4);
+      return .2126 * r + .7152 * g + .0722 * b; };
+    const [a, b] = [lum(h1), lum(h2)].sort((x, y) => y - x);
+    return (a + .05) / (b + .05);
+  }
+  // any accent works: a light pick (yellow, sky blue...) is deepened until white text on it and
+  // it as text on white both read clearly (4.5:1). The exact pick still draws the thin brand lines.
+  function readableAccent(hex) {
+    let c = hex, i = 0;
+    while (contrast(c, '#ffffff') < 4.5 && i++ < 20) c = mixHex(hex, '#000000', i * .05);
+    return c;
+  }
   function applyTheme(t = { theme: S.settings?.theme, accent: S.settings?.accent_color }) {
     const modern = t.theme === 'modern';
     document.body.classList.toggle('theme-modern', modern);
-    const acc = /^#[0-9A-Fa-f]{6}$/.test(t.accent || '') ? t.accent : '#00667D';
+    const brand = /^#[0-9A-Fa-f]{6}$/.test(t.accent || '') ? t.accent.toLowerCase() : '#00667d';
+    const acc = readableAccent(brand);
     const root = document.body.style;
-    if (modern) { root.setProperty('--accent', acc); root.setProperty('--accent-dark', mixHex(acc, '#000000', .25)); root.setProperty('--accent-tint', mixHex(acc, '#ffffff', .9)); }
-    else ['--accent', '--accent-dark', '--accent-tint'].forEach(k => root.removeProperty(k));
+    if (modern) { root.setProperty('--accent', acc); root.setProperty('--accent-brand', brand); root.setProperty('--accent-dark', mixHex(acc, '#000000', .25)); root.setProperty('--accent-tint', mixHex(brand, '#ffffff', .88)); }
+    else ['--accent', '--accent-brand', '--accent-dark', '--accent-tint'].forEach(k => root.removeProperty(k));
     document.querySelector('meta[name=theme-color]')?.setAttribute('content', modern ? '#ffffff' : '#C41230');
     window.WMS_DOC_ACCENT = modern ? acc : '#C41230';
     savePref('theme', { theme: t.theme || 'lwh', accent: acc });

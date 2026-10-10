@@ -434,11 +434,11 @@ a.kpi:hover { border-color: #b9b9c0; }
    Thin type only on desktop; phones and Dock Mode stay bold for sunlight.
    ====================================================================== */
 body.theme-modern {
-  --accent: #00667D; --accent-dark: #004f61; --accent-tint: #e6f0f2;
+  --accent: #00667D; --accent-brand: #00667D; --accent-dark: #004f61; --accent-tint: #e6f0f2;
   --red: var(--accent); --red-dark: var(--accent-dark); --black: #111111;
   --line: #9a9a95; --bg: #ffffff; --card: #ffffff; --muted: #5c5c59; --radius: 0px;
 }
-body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 3px solid var(--accent); }
+body.theme-modern .app-header { background: #fff; color: #111; border-bottom: 3px solid var(--accent-brand); }
 body.theme-modern .brand { color: #111; }
 body.theme-modern .brand-mark { background: var(--accent); border-radius: 0; letter-spacing: 2px; }
 body.theme-modern .brand-text { font-weight: 400; letter-spacing: 3px; text-transform: uppercase; font-size: 16px; }
@@ -449,8 +449,8 @@ body.theme-modern #hdr-wx:not(:empty) { border-right-color: #cfcfcc; }
 body.theme-modern .card, body.theme-modern .list-item, body.theme-modern .kpi, body.theme-modern .tile, body.theme-modern .week-day { border-radius: 0; box-shadow: none; border-color: var(--line); }
 body.theme-modern .parties, body.theme-modern .st-acct { border-radius: 0; }
 body.theme-modern .st-acct { background: var(--accent); }
-body.theme-modern .card.accent { border-top: 3px solid var(--accent); }
-body.theme-modern .tile { border-left: 4px solid var(--accent); }
+body.theme-modern .card.accent { border-top: 3px solid var(--accent-brand); }
+body.theme-modern .tile { border-left: 4px solid var(--accent-brand); }
 body.theme-modern .btn, body.theme-modern input, body.theme-modern select, body.theme-modern textarea, body.theme-modern .tabs a,
 body.theme-modern .notice, body.theme-modern .modal-card, body.theme-modern .toast, body.theme-modern .badge,
 body.theme-modern .flash, body.theme-modern .seg, body.theme-modern .seg a, body.theme-modern .ev { border-radius: 0; }
@@ -463,6 +463,11 @@ body.theme-modern input, body.theme-modern select, body.theme-modern textarea { 
 body.theme-modern input:focus, body.theme-modern select:focus, body.theme-modern textarea:focus { outline: 3px solid var(--accent-tint); border-color: var(--accent); }
 body.theme-modern .back, body.theme-modern a { color: var(--accent); }
 body.theme-modern a.list-item, body.theme-modern a.kpi, body.theme-modern a.tile, body.theme-modern .sidenav a, body.theme-modern .week-head { color: #111; }
+/* link-styled buttons keep their button colors (the accent link color made them unreadable) */
+body.theme-modern a.btn { color: #fff; }
+body.theme-modern a.btn.secondary { color: var(--accent); }
+body.theme-modern a.btn.ghost { color: var(--ink); }
+body.theme-modern a.btn.danger { color: var(--bad); }
 body.theme-modern .toast { background: #111; }
 body.theme-modern .lane-head { border-left-color: #111; }
 body.theme-modern .lane-out .lane-head { border-left-color: var(--accent); }
