@@ -371,7 +371,32 @@
     S.whId = ok(S.whId) ? S.whId : ok(pref) ? pref : ok(S.profile?.home_warehouse_id) ? S.profile.home_warehouse_id
       : (warehouses.find(w => w.active) || {}).id;
     S.users = await q(sb.from('app_users').select('id, full_name')).catch(() => []);
+    await loadWhStock();
     document.title = (cfg.BRAND_SHORT || '') + ' WMS';
+  }
+
+  /* ---- which accounts have stock in the current warehouse ----
+     S.whStock: owner_id -> pallets here. When the warehouse changes (or at sign-in),
+     a remembered account filter with nothing here switches to the account with the
+     most pallets here, so screens don't come up empty. */
+  async function loadWhStock() {
+    S.whStock = new Map();
+    if (!S.whId || !multiOwner() || isLift()) return;
+    const rows = await fetchAll(() => sb.from('v_inventory_by_lot').select('owner_id, pallets').eq('warehouse_id', S.whId).order('owner_id')).catch(() => []);
+    for (const r of rows) S.whStock.set(r.owner_id, (S.whStock.get(r.owner_id) || 0) + Number(r.pallets));
+    const top = [...S.whStock.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+    const fit = id => id && !S.whStock.get(id) ? top : id;
+    const dash = loadPref('dashOwner', '');
+    if (!loadPref('dashAllWh', false) && fit(dash) !== dash) savePref('dashOwner', fit(dash));
+    const inv = loadPref('invFilter', {});
+    if (inv && inv.acct && !inv.allWh && fit(inv.acct) !== inv.acct) savePref('invFilter', { ...inv, acct: fit(inv.acct) });
+  }
+  // account <option>s, ones with pallets in this warehouse first, with a count
+  function acctOptions(selected, allWh) {
+    const here = id => S.whStock?.get(id) || 0;
+    const list = activeOwners().slice();
+    if (!allWh && S.whStock?.size) list.sort((a, b) => (here(b.id) > 0) - (here(a.id) > 0) || a.code.localeCompare(b.code));
+    return list.map(o => `<option value="${o.id}" ${o.id === selected ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}${!allWh && S.whStock?.size ? (here(o.id) ? ` (${fmtQty(here(o.id))} plt here)` : ' (none here)') : ''}</option>`).join('');
   }
 
   /* ---- header clock + local weather (desktop) ---- */
@@ -437,7 +462,7 @@
       sb.rpc('wms_set_home_warehouse', { p_warehouse_id: S.whId }).then(() => {}, () => {});
       toast(`Now working in ${whById(S.whId).code}: ${whById(S.whId).name}.`);
       updateWeather();
-      route();
+      loadWhStock().finally(route);
     });
     $('#signout').onclick = async () => {
       await sb.auth.signOut();
@@ -504,6 +529,8 @@
       if (a === 'receipt' && b === 'new') return viewNewReceipt();
       if (a === 'receipt' && b) return viewReceipt(b);
       if (a === 'lookup') return viewLookup(decodeURIComponent(b || ''));
+      if (a === 'pallet' && b) return viewPalletHistory(b);
+      if (a === 'history') return viewHistorySearch(decodeURIComponent(b || ''));
       if (a === 'inventory') return viewInventory();
       if (a === 'schedule') return viewSchedule(b, c);
       if (a === 'reports') return viewReports();
@@ -717,7 +744,7 @@
           <div><h1 style="margin-bottom:2px">${esc(companyName())}</h1>
             <div class="muted small">${scopeTxt} &middot; ${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div></div>
           <div class="dash-filters">
-            ${multiOwner() ? `<select id="dash-acct" aria-label="Account"><option value="">All accounts</option>${activeOwners().map(o => `<option value="${o.id}" ${o.id === acct ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('')}</select>` : ''}
+            ${multiOwner() ? `<select id="dash-acct" aria-label="Account"><option value="">All accounts</option>${acctOptions(acct, allWh)}</select>` : ''}
             ${multiWh() ? `<label class="check"><input type="checkbox" id="dash-allwh" ${allWh ? 'checked' : ''}> All warehouses</label>` : ''}
           </div>
         </div>
@@ -1441,7 +1468,7 @@
               <input id="inv-loc" value="${esc(f.loc)}" placeholder="e.g. A01" autocomplete="off" autocapitalize="characters" list="inv-locs"></div>
             <datalist id="inv-locs">${(f.allWh ? S.locations : whLocations()).filter(l => l.active).map(l => `<option value="${esc(l.code)}"></option>`).join('')}</datalist>
             ${multiOwner() ? `<div class="field"><label for="inv-acct">Account</label>
-              <select id="inv-acct"><option value="">All accounts</option>${activeOwners().map(o => `<option value="${o.id}" ${o.id === f.acct ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('')}</select></div>` : ''}
+              <select id="inv-acct"><option value="">All accounts</option>${acctOptions(f.acct, f.allWh)}</select></div>` : ''}
             <div class="field"><label for="inv-status">Status</label>
               <select id="inv-status"><option value="">On hand + hold</option><option value="on_hand" ${f.status === 'on_hand' ? 'selected' : ''}>On hand only</option><option value="hold" ${f.status === 'hold' ? 'selected' : ''}>On hold only</option></select></div>
             <div class="field"><label for="inv-view">Show</label>
@@ -1655,7 +1682,10 @@
     }
     if (stale()) return;
     if (!rows.length) {
-      out.innerHTML = `<div class="notice warn">Nothing in stock matches "${esc(term)}".</div>`;
+      const past = await searchAllPallets(term).catch(() => []);
+      if (stale()) return;
+      out.innerHTML = `<div class="notice warn">Nothing in stock matches "${esc(term)}".</div>
+        ${past.length ? `<h2>Past pallets <span class="muted small">(shipped or voided: tap for full history)</span></h2>${pastPalletList(past)}` : ''}`;
       return;
     }
     const totalQty = rows.reduce((a, r) => a + Number(r.qty_on_hand), 0);
@@ -1677,6 +1707,149 @@
       palletModal(rows.find(r => r.pallet_id === a.dataset.pallet), () => viewLookup(term));
     });
     if (exact && rows.length === 1) palletModal(rows[0], () => viewLookup(term));
+  }
+
+  /* ---- pallet history: any pallet, any status, kept forever ---- */
+  const PALLET_COLS = `id, lp_id, customer_pallet_id, ${REF_COLS}, origin_ref, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, status, location_id, receipt_id, notes, created_at`;
+  // exact identifier match (any status) first, else partial matches; newest first
+  async function searchAllPallets(term) {
+    const safe = term.replace(/[,()*%\\]/g, ' ').trim();
+    if (!safe) return [];
+    const fields = ['lp_id', 'customer_pallet_id', ...REF_NUMS.map(n => 'ref' + n), 'origin_ref'];
+    let rows = await q(sb.from('pallets').select(PALLET_COLS).or(fields.map(f => `${f}.ilike.${safe}`).join(',')).order('created_at', { ascending: false }).limit(50));
+    if (!rows.length) rows = await q(sb.from('pallets').select(PALLET_COLS).or(fields.map(f => `${f}.ilike.*${safe}*`).join(',')).order('created_at', { ascending: false }).limit(50));
+    return rows;
+  }
+  function pastPalletList(rows) {
+    return rows.map(p => { const it = itemById(p.item_id);
+      return `<a class="list-item pallet" href="#/pallet/${p.id}">
+        <div><div class="lp">${esc(p.lp_id)} ${badge(p.status)}</div>
+          <div><strong>${esc(it.sku || '')}</strong> &middot; ${lotText(p)}</div>
+          <div class="meta">Rcvd ${esc(fmtDate(p.created_at))}${multiOwner() ? ' &middot; ' + esc(ownerById(it.owner_id).code || '') : ''}</div>
+          ${idText(p, it.owner_id) ? `<div class="meta">${idText(p, it.owner_id)}</div>` : ''}</div>
+        <div class="qty">${esc(fmtQty(p.qty_received))}<div class="meta">${esc(it.uom || '')} in</div></div></a>`; }).join('');
+  }
+
+  async function viewHistorySearch(term) {
+    if (isLift()) { location.hash = '#/'; return; }
+    const mySeq = navSeq;
+    render(`
+      <a class="back" href="#/reports">&larr; Reports</a>
+      <h1>Pallet History</h1>
+      <form id="ph-form" class="card accent">
+        <label for="ph">Any pallet ID: WMS, ${esc(idFields().map(f => f.label).join(', '))} or LWH Control #. Shipped pallets included.</label>
+        <div class="input-scan"><input id="ph" value="${esc(term)}" autocomplete="off" enterkeyhint="search">${scanBtn('ph', 'ph-form')}</div>
+        <div class="btn-row"><button class="btn">Find pallet</button></div>
+      </form>
+      <div id="ph-out"></div>`);
+    wireScanButtons($('#ph-form'));
+    $('#ph-form').onsubmit = e => { e.preventDefault(); const t = $('#ph').value.trim(); if (t) location.hash = '#/history/' + encodeURIComponent(t); };
+    if (!term) { setTimeout(() => $('#ph')?.focus(), 50); return; }
+    const rows = await searchAllPallets(term);
+    if (mySeq !== navSeq) return;
+    if (rows.length === 1) { location.replace('#/pallet/' + rows[0].id); return; }
+    $('#ph-out').innerHTML = rows.length ? pastPalletList(rows) : `<div class="notice warn">No pallet matches "${esc(term)}".</div>`;
+  }
+
+  const EVENT_NAMES = { RECEIVE: 'Received', MOVE: 'Moved', SHIP: 'Shipped', ADJUST: 'Qty adjusted', HOLD: 'Put on hold',
+    RELEASE: 'Hold released', VOID_RECEIVE: 'Receipt voided', VOID_SHIP: 'Shipment voided (back in stock)' };
+  async function loadPalletHistory(id) {
+    const p = await q(sb.from('pallets').select(PALLET_COLS).eq('id', id).single());
+    const [rcpt, txns, slines] = await Promise.all([
+      p.receipt_id ? q(sb.from('receipts').select('*').eq('id', p.receipt_id).single()).catch(() => null) : null,
+      fetchAll(() => sb.from('v_transactions').select('*').eq('lp_id', p.lp_id).order('id')),
+      q(sb.from('shipment_lines').select('shipment_id, qty, created_at').eq('pallet_id', id))
+    ]);
+    const shipIds = [...new Set(slines.map(l => l.shipment_id))];
+    const ships = shipIds.length ? await q(sb.from('shipments').select('*').in('id', shipIds).order('created_at')) : [];
+    const item = itemById(p.item_id);
+    return { p, item, owner: ownerById(item.owner_id), rcpt, txns,
+      ships: ships.map(sh => ({ ...sh, qty: slines.filter(l => l.shipment_id === sh.id).reduce((a, l) => a + Number(l.qty), 0) })) };
+  }
+  const whereText = h => {
+    const at = (w, l) => [multiWh() ? w : '', l].filter(Boolean).join(' ');
+    const from = at(h.from_warehouse, h.from_location), to = at(h.to_warehouse, h.to_location);
+    return from && to && from !== to ? `${from} → ${to}` : to || from || '';
+  };
+  const addrText = sh => [sh.ship_to_address1, sh.ship_to_address2, [sh.ship_to_city, sh.ship_to_state].filter(Boolean).join(', '), sh.ship_to_zip].filter(Boolean).join(' · ');
+
+  async function viewPalletHistory(id) {
+    if (isLift()) { location.hash = '#/'; return; }
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const H = await loadPalletHistory(id);
+    if (mySeq !== navSeq) return;
+    const { p, item, owner, rcpt, txns, ships } = H;
+    const loc = locById(p.location_id);
+    render(`
+      <a class="back" href="#/history">&larr; Pallet History</a>
+      <div class="row spread"><h1>${esc(p.lp_id)} ${badge(p.status)}</h1>
+        <div class="btn-row" style="margin:0"><button class="btn secondary sm" id="ph-print">Print</button><button class="btn ghost sm" id="ph-csv">Export CSV</button></div></div>
+      <div class="grid-2col">
+        <div class="card">
+          <h2>Pallet</h2>
+          <dl class="kv">
+            <dt>Item</dt><dd>${esc(item.sku || '')} — ${esc(item.description || '')}</dd>
+            <dt>${esc(lbl.lot())}</dt><dd>${esc(p.lot_number || '-')}</dd>
+            ${multiOwner() ? `<dt>Account</dt><dd>${esc(owner.code || '')} — ${esc(owner.name || '')}</dd>` : ''}
+            ${idFields(item.owner_id).filter(f => p[f.field]).map(f => `<dt>${esc(f.label)}</dt><dd>${esc(p[f.field])}</dd>`).join('')}
+            ${p.origin_ref ? `<dt>LWH Control #</dt><dd>${esc(p.origin_ref)}</dd>` : ''}
+            ${p.production_date ? `<dt>Produced</dt><dd>${esc(fmtDate(p.production_date))}</dd>` : ''}
+            ${p.expiration_date ? `<dt>Expires</dt><dd>${esc(fmtDate(p.expiration_date))}</dd>` : ''}
+            <dt>Qty received</dt><dd>${esc(fmtQty(p.qty_received))} ${esc(item.uom || '')}</dd>
+            <dt>On hand now</dt><dd>${esc(fmtQty(p.qty_on_hand))} ${esc(item.uom || '')}</dd>
+            <dt>${p.status === 'shipped' ? 'Last location' : 'Location'}</dt><dd>${esc([multiWh() ? whById(loc.warehouse_id).code : '', loc.code].filter(Boolean).join(' ') || '-')}</dd>
+            ${p.notes ? `<dt>Notes</dt><dd>${esc(p.notes)}</dd>` : ''}
+          </dl>
+        </div>
+        <div class="card">
+          <h2>Inbound</h2>
+          ${rcpt ? `<dl class="kv">
+            <dt>Receipt</dt><dd><a href="#/receipt/${rcpt.id}">${esc(rcpt.receipt_no)}</a>${rcpt.is_opening ? ' <span class="muted small">(opening / transfer)</span>' : ''}</dd>
+            <dt>Received</dt><dd>${esc(fmtDateTime(p.created_at))}</dd>
+            ${multiWh() ? `<dt>Warehouse</dt><dd>${esc(whById(rcpt.warehouse_id).code)}</dd>` : ''}
+            <dt>From / Vendor</dt><dd>${esc(rcpt.vendor_name || '-')}</dd>
+            <dt>Carrier</dt><dd>${esc(rcpt.carrier || '-')}</dd>
+            <dt>Trailer / Seal</dt><dd>${esc([rcpt.trailer_no, rcpt.seal_no].filter(Boolean).join(' / ') || '-')}</dd>
+            <dt>PO #</dt><dd>${esc(rcpt.po_number || '-')}</dd>
+            <dt>Inbound BOL</dt><dd>${esc(rcpt.inbound_bol || '-')}</dd>
+          </dl>` : '<p class="muted">No receipt on file.</p>'}
+        </div>
+      </div>
+      <div class="card">
+        <h2>Outbound</h2>
+        ${ships.length ? ships.map(sh => `
+          <div class="list-item" style="display:block">
+            <div class="row spread"><strong><a href="#/shipment/${sh.id}">${esc(sh.shipment_no)}</a> ${badge(sh.status)}</strong>
+              <span>${esc(fmtQty(sh.qty))} ${esc(item.uom || '')}</span></div>
+            <div class="meta">${sh.status === 'shipped' ? 'Shipped ' + esc(fmtDateTime(sh.shipped_at)) : 'Ship date ' + esc(fmtDate(sh.ship_date))}${multiWh() ? ' &middot; from ' + esc(whById(sh.warehouse_id).code) : ''}</div>
+            <div><strong>${esc(sh.ship_to_name || '')}</strong> <span class="muted small">${esc(addrText(sh))}</span></div>
+            <div class="meta">${esc([sh.carrier && 'Carrier ' + sh.carrier, sh.trailer_no && 'Trailer ' + sh.trailer_no, sh.seal_no && 'Seal ' + sh.seal_no,
+              sh.pro_number && 'PRO ' + sh.pro_number, sh.customer_order_no && 'Order ' + sh.customer_order_no, sh.po_number && 'PO ' + sh.po_number].filter(Boolean).join(' · '))}</div>
+          </div>`).join('') : '<p class="muted">Not on any load.</p>'}
+      </div>
+      <div class="card">
+        <h2>Every move <span class="muted small">(${txns.length} event${txns.length === 1 ? '' : 's'}, oldest first)</span></h2>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>When</th><th>Event</th><th>Where</th><th class="num">Qty</th><th class="num">After</th><th>Ref</th><th>By</th><th>Reason</th></tr></thead>
+          <tbody>${txns.map(h => `<tr>
+            <td class="small">${esc(fmtDateTime(h.created_at))}</td>
+            <td>${esc(EVENT_NAMES[h.txn_type] || h.txn_type)}${h.opening && h.txn_type === 'RECEIVE' ? ' <span class="muted small">(opening)</span>' : ''}</td>
+            <td>${esc(whereText(h))}</td>
+            <td class="num">${Number(h.qty_change) ? esc((h.qty_change > 0 ? '+' : '') + fmtQty(h.qty_change)) : ''}</td>
+            <td class="num">${esc(fmtQty(h.qty_after))}</td>
+            <td>${esc(h.shipment_no || h.receipt_no || '')}</td>
+            <td class="small">${esc(h.user_name || '')}</td>
+            <td class="small">${esc(h.reason || '')}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>`);
+    const rowsFor = () => txns.map(h => [fmtDateTime(h.created_at), EVENT_NAMES[h.txn_type] || h.txn_type, whereText(h),
+      Number(h.qty_change) ? fmtQty(h.qty_change) : '', fmtQty(h.qty_after), h.shipment_no || h.receipt_no || '', h.user_name || '', h.reason || '']);
+    $('#ph-print').onclick = () => WmsPrint.palletHistory(H, rowsFor(), { ...docSettings(rcpt?.warehouse_id || S.whId, item.owner_id) },
+      { ids: idFields(item.owner_id), lotLabel: lbl.lot(), whCode: id => whById(id).code, multiWh: multiWh(), addr: addrText });
+    $('#ph-csv').onclick = () => downloadCsv(`pallet-history-${p.lp_id}.csv`,
+      ['WMS Pallet ID', ...idFields(item.owner_id).map(f => f.label), 'SKU', lbl.lotShort(), 'When', 'Event', 'Where', 'Qty Change', 'Qty After', 'Ref', 'By', 'Reason'],
+      rowsFor().map(r => [p.lp_id, ...idFields(item.owner_id).map(f => p[f.field] || ''), item.sku, p.lot_number || '', ...r]));
   }
 
   async function palletModal(p, onChange) {
@@ -1714,7 +1887,8 @@
           <button class="btn ghost" id="pm-hold">${p.status === 'hold' ? 'Release Hold' : 'Put on Hold'}</button>` : ''}
       </div>
 
-      <h3 style="margin-top:18px">History</h3>
+      <div class="row spread" style="margin-top:18px"><h3 style="margin:0">History</h3>
+        <a class="btn sm ghost" href="#/pallet/${p.pallet_id}" id="pm-full">Full pallet history</a></div>
       <div class="table-wrap"><table class="data">
         <thead><tr><th>When</th><th>Action</th><th class="num">Qty</th><th>Detail</th></tr></thead>
         <tbody>${hist.map(h => `<tr>
@@ -1726,6 +1900,7 @@
       </table></div>`;
 
     $('#pm-rcpt', body).onclick = () => closeModal();
+    $('#pm-full', body).onclick = () => closeModal();
     $('#pm-label', body).onclick = () => WmsPrint.labels([{ ...p, qty: p.qty_on_hand }], docSettings(p.warehouse_id, p.owner_id), loadPref('labelCopies', 1));
     $('#pm-move', body)?.addEventListener('submit', e => {
       e.preventDefault();
@@ -3325,6 +3500,13 @@
       </div>
 
       <div class="card">
+        <h2>Pallet history</h2>
+        <div class="field"><label for="ph-q">Any pallet ID (shipped pallets included)</label><input id="ph-q" autocomplete="off"></div>
+        <div class="btn-row"><button class="btn" id="ph-go" type="button">Find pallet</button></div>
+        <div class="hint">One pallet's full record: inbound load, every bay move, hold and adjustment, and the load(s) it shipped on. Nothing is ever deleted, so shipped pallets stay searchable.</div>
+      </div>
+
+      <div class="card">
         <h2>Lot trace / recall</h2>
         <div class="grid2">
           <div class="field"><label for="lt-lot">${esc(lbl.lot())}</label><input id="lt-lot" autocomplete="off" placeholder="e.g. 10-08/26"></div>
@@ -3419,7 +3601,7 @@
             <div class="row"><button class="btn secondary sm" id="rv-csv" type="button">Export CSV</button><button class="btn secondary sm" id="rv-print" type="button">Print</button></div></div>
           ${rows.length ? `<div class="table-wrap" style="margin-top:10px"><table class="data">
             <thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
-            <tbody>${rows.slice(0, 1000).map(r => `<tr>${r.map((v, i) => `<td class="${cols[i].num ? 'num' : ''}">${esc(v ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>
+            <tbody>${rows.slice(0, 1000).map(r => `<tr>${r.map((v, i) => `<td class="${cols[i].num ? 'num' : ''}">${cols[i].label === 'WMS Pallet ID' && v ? `<a href="#/history/${encodeURIComponent(v)}" title="Full pallet history">${esc(v)}</a>` : esc(v ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>
           </table></div>${rows.length > 1000 ? '<p class="muted small">Showing the first 1,000 rows. Export to see them all.</p>' : ''}` : '<p class="muted" style="margin-top:10px">Nothing found.</p>'}
         </div>`;
       $('#rv-csv').onclick = () => { const n = downloadCsv(file, cols.map(c => c.label), rows); toast(`Exported ${n} row${n === 1 ? '' : 's'}.`); };
@@ -3473,6 +3655,8 @@
       }
     };
     $$('[data-view]').forEach(b => b.onclick = () => busy(b, views[b.dataset.view]));
+    $('#ph-go').onclick = () => { const t = $('#ph-q').value.trim(); location.hash = '#/history' + (t ? '/' + encodeURIComponent(t) : ''); };
+    $('#ph-q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#ph-go').click(); } });
     $('#lt-lot').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); busy($('[data-view=trace]'), views.trace); } });
   }
 

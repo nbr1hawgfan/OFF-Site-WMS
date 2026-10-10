@@ -3,6 +3,25 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.5.0 pallet history + warehouse-aware accounts:**
+- **Pallet History** (Reports, or `#/history`): find any pallet by any ID, even
+  shipped or voided, for its full record:
+  - **Inbound:** the receipt with vendor, carrier, trailer/seal, PO and inbound
+    BOL.
+  - **Every move:** each bay move, hold, adjustment and void, with who and why.
+  - **Outbound:** each load it went on, with ship-to, carrier, trailer, seal,
+    PRO and order #.
+  - **Output:** printable and exportable.
+- **Linked from:** Inventory Lookup shows past pallets when nothing in stock
+  matches, the pallet card has "Full pallet history", and pallet IDs in on-screen
+  reports link to it.
+- **Retention:** nothing is ever deleted (the ledger is append-only and voids
+  are kept), so records stay for as long as the database does.
+- **Accounts by warehouse:** switching warehouses (or signing in) moves a
+  remembered account filter that has no stock there to the account with the most
+  pallets there. Account dropdowns list who has stock here first, with a pallet
+  count.
+
 **v1.4.1 picking help:**
 - **Adding a product to a load** shows pallets available per item (in the
   dropdown) and, once picked, a table by lot with qty and bays. Tap a lot to

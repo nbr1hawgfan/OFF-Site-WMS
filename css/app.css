@@ -502,3 +502,7 @@ body.theme-modern .big-input { border: 2px solid #111; }
 /* import */
 tr.imp-err td { background: var(--bad-bg); }
 td.imp-why { min-width: 220px; max-width: 360px; white-space: normal; font-weight: 600; color: var(--bad); }
+
+/* pallet history: two cards side by side on wide screens */
+.grid-2col { display: grid; grid-template-columns: 1fr; gap: 0 14px; }
+@media (min-width: 900px) { .grid-2col { grid-template-columns: 1fr 1fr; } }

@@ -578,6 +578,42 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter landscape; margin: 0.4in;');
   }
 
+  /* one pallet's full record (recall / audit) */
+  function palletHistory(H, rows, settings, x) {
+    const { p, item, owner, rcpt, ships } = H;
+    const kv = pairs => `<table class="kv">${pairs.filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('')}</table>`;
+    const html = `<style>${TB_CSS()}
+        .ph .kv { width: 100%; border-collapse: collapse; margin: 0; }
+        .ph .kv th { text-align: left; width: 34%; font-size: 8pt; color: #444; background: none; border: 0; border-bottom: .5pt solid #ccc; padding: 2pt 4pt; text-transform: none; }
+        .ph .kv td { border: 0; border-bottom: .5pt solid #ccc; padding: 2pt 4pt; }
+        .ph .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12pt; margin: 6pt 0; }
+        .ph h3 { font-size: 10pt; margin: 8pt 0 3pt; text-transform: uppercase; letter-spacing: .5pt; }
+        .ph .ship { border: .75pt solid #000; padding: 4pt 6pt; margin-bottom: 4pt; font-size: 9pt; }
+      </style>
+      <div class="tb ph">${docHead(settings || {}, 'Pallet History — ' + p.lp_id, [item.sku, item.description].filter(Boolean).join(' — '))}
+        <div class="two">
+          <div><h3>Pallet</h3>${kv([['WMS Pallet ID', p.lp_id], ...x.ids.filter(f => p[f.field]).map(f => [f.label, p[f.field]]),
+            ['LWH Control #', p.origin_ref], ['Item', `${item.sku || ''} — ${item.description || ''}`], [x.lotLabel, p.lot_number || '-'],
+            ['Account', owner.code ? `${owner.code} — ${owner.name}` : ''], ['Produced', p.production_date ? fmtDate(p.production_date) : ''],
+            ['Expires', p.expiration_date ? fmtDate(p.expiration_date) : ''], ['Qty received', `${fmtQty(p.qty_received)} ${item.uom || ''}`],
+            ['On hand now', `${fmtQty(p.qty_on_hand)} ${item.uom || ''}`], ['Status', String(p.status).toUpperCase()]])}</div>
+          <div><h3>Inbound</h3>${rcpt ? kv([['Receipt', rcpt.receipt_no + (rcpt.is_opening ? ' (opening / transfer)' : '')], ['Received', fmtDateTime(p.created_at)],
+            ['Warehouse', x.multiWh ? x.whCode(rcpt.warehouse_id) : ''], ['From / Vendor', rcpt.vendor_name], ['Carrier', rcpt.carrier],
+            ['Trailer / Seal', [rcpt.trailer_no, rcpt.seal_no].filter(Boolean).join(' / ')], ['PO #', rcpt.po_number], ['Inbound BOL', rcpt.inbound_bol]]) : '<p>No receipt on file.</p>'}</div>
+        </div>
+        <h3>Outbound</h3>
+        ${ships.length ? ships.map(sh => `<div class="ship"><strong>${esc(sh.shipment_no)}</strong> &middot; ${esc(String(sh.status).toUpperCase())} &middot;
+          ${esc(sh.status === 'shipped' ? 'Shipped ' + fmtDateTime(sh.shipped_at) : 'Ship date ' + fmtDate(sh.ship_date))} &middot; ${esc(fmtQty(sh.qty))} ${esc(item.uom || '')}<br>
+          <strong>${esc(sh.ship_to_name || '')}</strong> ${esc(x.addr(sh))}<br>
+          ${esc([sh.carrier && 'Carrier ' + sh.carrier, sh.trailer_no && 'Trailer ' + sh.trailer_no, sh.seal_no && 'Seal ' + sh.seal_no, sh.pro_number && 'PRO ' + sh.pro_number,
+            sh.customer_order_no && 'Order ' + sh.customer_order_no, sh.po_number && 'PO ' + sh.po_number].filter(Boolean).join(' · '))}</div>`).join('') : '<p>Not on any load.</p>'}
+        <h3>Every move</h3>
+        <table><thead><tr>${['When', 'Event', 'Where', 'Qty', 'After', 'Ref', 'By', 'Reason'].map((c, i) => `<th class="${i === 3 || i === 4 ? 'num' : ''}">${c}</th>`).join('')}</tr></thead>
+          <tbody>${rows.map(r => `<tr>${r.map((v, i) => `<td class="${i === 3 || i === 4 ? 'num' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>
+        <div style="margin-top:6pt;font-size:8pt;color:#555">Printed ${esc(fmtDateTime(new Date()))}</div></div>`;
+    printDoc(html, 'size: letter portrait; margin: 0.4in;');
+  }
+
   /* location / cycle-count report: pallets grouped by location, a QR per pallet */
   function locationReport(pallets, sub, settings) {
     const s = settings || {};
@@ -612,5 +648,5 @@ const WmsPrint = (() => {
     printDoc(html, 'size: letter portrait; margin: 0.4in;');
   }
 
-  return { labels, receipt, bol, loadSheet, unloadSheet, statement, table, locationReport };
+  return { labels, receipt, bol, loadSheet, unloadSheet, statement, table, locationReport, palletHistory };
 })();
