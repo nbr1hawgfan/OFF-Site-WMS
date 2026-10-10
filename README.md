@@ -3,6 +3,22 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.8.0 load import** (migration 018): Receiving / Shipping > Import Loads.
+- **What it does:** drop in the customer's schedule sheet (.xlsx, .csv or
+  pasted rows).
+  - **Inbound:** each BOL becomes an open receipt (account, warehouse,
+    appointment, shipper, carrier, BOL #) with its expected lines (item, lot,
+    pallets, qty, and an identifier such as PGID).
+  - **Outbound:** each order # becomes a shipment with order lines.
+- **Column setup:** first-time guesses come from the headers; warehouse values
+  like "3333 S Zero Street" are matched to a warehouse; save the setup per
+  customer.
+- **Duplicates:** BOL / order #s already in the system are skipped.
+- **Receiving:** the receipt shows "Expected on this load" with progress. The
+  receive form is pre-filled from the next unfinished line (item, lot, qty per
+  pallet, PGID), so the dock just scans each pallet label. The unload sheet
+  prints the expected lines.
+
 **v1.7.0 photos, bay map, cycle counts** (migration 017):
 - **Load photos:** "Add Photo" on receipts, shipments and the Dock Mode
   load/unload screens.
@@ -235,7 +251,7 @@ sheet with row counts. Meant as a monthly off-site copy of the records.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–017 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–018 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files

@@ -566,6 +566,7 @@
       if (a === 'lookup') return viewLookup(decodeURIComponent(b || ''));
       if (a === 'pallet' && b) return viewPalletHistory(b);
       if (a === 'map') return viewBayMap();
+      if (a === 'loads' && b === 'import') return viewLoadImport(c);
       if (a === 'counts') return viewCounts();
       if (a === 'count' && b) return viewCount(b);
       if (a === 'history') return viewHistorySearch(decodeURIComponent(b || ''));
@@ -1029,7 +1030,7 @@
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <div class="row spread"><h1>${isCustomer() ? "Receipts" : "Receiving"}${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
-        ${can('operator') ? `<a class="btn" href="#/receipt/new">New Receipt</a>` : ''}</div>
+        ${can('operator') ? `<span class="row" style="gap:8px"><a class="btn secondary" href="#/loads/import/inbound">Import Loads</a><a class="btn" href="#/receipt/new">New Receipt</a></span>` : ''}</div>
       <h2>Open</h2>
       ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open receipts.</p>`}
       <h2 style="margin-top:20px">Recent</h2>
@@ -1162,11 +1163,12 @@
   async function viewReceipt(id, focusId, dockMode = isLift()) {
     const mySeq = navSeq;
     if (!document.querySelector('#rcpt-page')) render(`<div class="loading">Loading...</div>`);
-    const [rcpt, pallets] = await Promise.all([
+    const [rcpt, pallets, expLines] = await Promise.all([
       q(sb.from('receipts').select('*').eq('id', id).single()),
       q(sb.from('pallets')
         .select(`id, lp_id, customer_pallet_id, ${REF_COLS}, origin_ref, item_id, lot_number, production_date, expiration_date, qty_received, qty_on_hand, location_id, status, notes`)
-        .eq('receipt_id', id).order('lp_id'))
+        .eq('receipt_id', id).order('lp_id')),
+      q(sb.from('receipt_lines').select('*').eq('receipt_id', id).order('sort_order')).catch(() => [])
     ]);
     if (rcpt.status === 'open' && can('operator') && !dockMode) await loadVendorSuggestions().catch(() => {});
     if (mySeq !== navSeq) return;
@@ -1205,6 +1207,48 @@
         ${rcpt.status === 'void' ? `<dt>Void reason</dt><dd>${esc(rcpt.void_reason || '')}</dd>` : ''}
       </dl>`;
 
+    // expected lines (from a load import): how much of each has arrived
+    const pool = active.slice();
+    const exp = expLines.map(l => {
+      const it = itemById(l.item_id);
+      const got = pool.filter(p => p.item_id === l.item_id && (!l.lot_number || (p.lot_number || '').toUpperCase() === l.lot_number)
+        && (!l.ref_field || !l.ref_value || String(p[l.ref_field] || '').toUpperCase() === l.ref_value));
+      const take = l.pallets ? got.slice(0, l.pallets) : got;
+      take.forEach(p => pool.splice(pool.indexOf(p), 1));
+      return { ...l, it, recvPallets: take.length, recvQty: take.reduce((a, p) => a + Number(p.qty_received), 0),
+        perPallet: l.qty && l.pallets ? Math.round(l.qty / l.pallets * 100) / 100 : (it.units_per_pallet ? Number(it.units_per_pallet) : null),
+        done: l.pallets ? take.length >= l.pallets : false };
+    });
+    const refLabel = l => (idFields(rcpt.owner_id).find(f => f.field === l.ref_field) || {}).label || l.ref_field;
+    const expCard = !exp.length && !editable ? '' : `
+      <div class="card" id="exp-card">
+        <div class="row spread"><h2 style="margin:0">Expected on this load</h2>
+          ${exp.length ? `<span class="muted">${exp.reduce((a, l) => a + l.recvPallets, 0)} of ${exp.reduce((a, l) => a + (l.pallets || 0), 0) || '?'} pallets in</span>` : ''}</div>
+        ${exp.map((l, i) => `
+          <div class="list-item order-line ${l.done ? 'done' : ''}">
+            <div class="row spread">
+              <div><strong>${esc(l.it.sku || '')}</strong> &middot; ${l.lot_number ? esc(lbl.lotShort()) + ' ' + esc(l.lot_number) : 'any ' + esc(lbl.lotShort().toLowerCase())}
+                ${l.ref_value ? ` &middot; ${esc(refLabel(l))} <strong>${esc(l.ref_value)}</strong>` : ''}
+                <div class="meta">${esc(l.it.description || '')}${l.perPallet ? ` &middot; ${esc(fmtQty(l.perPallet))} ${esc(l.it.uom || '')}/pallet` : ''}</div></div>
+              <div style="text-align:right"><strong>${l.recvPallets}${l.pallets ? ' / ' + l.pallets : ''} plt</strong>
+                ${l.qty ? `<div class="meta">${esc(fmtQty(l.recvQty))} / ${esc(fmtQty(l.qty))} ${esc(l.it.uom || '')}</div>` : ''}</div>
+            </div>
+            ${l.pallets ? `<div class="bar"><span style="width:${Math.min(100, Math.round(l.recvPallets / l.pallets * 100))}%"></span></div>` : ''}
+            <div class="row" style="margin-top:6px;gap:6px">
+              ${canReceive && !l.done ? `<button type="button" class="btn sm secondary" data-use-exp="${i}">Receive this</button>` : ''}
+              ${editable ? `<button type="button" class="btn sm ghost" data-del-exp="${l.id}">Remove</button>` : ''}</div>
+          </div>`).join('') || '<p class="muted" style="margin:8px 0 0">Nothing listed. Imported loads fill this in; you can also add a line.</p>'}
+        ${editable ? `<details class="more"><summary>Add expected line</summary>
+          <form id="exp-add" class="grid2" style="margin-top:8px" autocomplete="off">
+            <div class="field"><label for="ex-item">Item</label><select id="ex-item" required><option value="">Select item...</option>${activeItems.map(i => `<option value="${i.id}">${esc(i.sku)} — ${esc(i.description)}</option>`).join('')}</select></div>
+            <div class="field"><label for="ex-lot">${esc(lbl.lot())}</label><input id="ex-lot" maxlength="60"></div>
+            <div class="field"><label for="ex-plt">Pallets</label><input id="ex-plt" type="number" inputmode="numeric" min="1" step="1"></div>
+            <div class="field"><label for="ex-qty">Total qty</label><input id="ex-qty" type="number" inputmode="decimal" min="0.01" step="any"></div>
+            <div class="field"><label for="ex-reff">Identifier on every pallet</label><select id="ex-reff"><option value="">none</option>${idFields(rcpt.owner_id).map(f => `<option value="${f.field}">${esc(f.label)}</option>`).join('')}</select></div>
+            <div class="field"><label for="ex-refv">Its value</label><input id="ex-refv" maxlength="60"></div>
+            <button class="btn secondary" id="ex-save">Add Line</button>
+          </form></details>` : ''}
+      </div>`;
     const addForm = !canReceive ? '' : activeItems.length === 0 ? `
       <div class="card"><div class="notice warn">No items set up yet for account ${esc(ownerById(rcpt.owner_id).code || '')}.
         ${can('manager') ? 'Add items in <a href="#/setup/items">Setup</a> first.' : 'Ask a manager to add items.'}</div></div>` : `
@@ -1284,6 +1328,7 @@
             </details>` : `<h2>Load Details</h2>${headerView}`}
         </div>
 
+        ${expCard}
         ${addForm}
 
         <div class="card">
@@ -1317,6 +1362,16 @@
     const reload = fid => viewReceipt(id, fid, dockMode);
     wireCharges($('#charges-card', page), { receipt_id: id, owner_id: rcpt.owner_id, warehouse_id: rcpt.warehouse_id, carrier_by: rcpt.carrier_by });
     photosCard($('#photos-card', page), { receipt_id: id, owner_id: rcpt.owner_id, canAdd: canDock() && !isCustomer() && rcpt.status !== 'void' });
+    $$('[data-del-exp]', page).forEach(b => b.onclick = () => busy(b, async () => { await q(sb.from('receipt_lines').delete().eq('id', b.dataset.delExp)); await reload(); toast('Line removed.'); }));
+    $('#exp-add', page)?.addEventListener('submit', e => {
+      e.preventDefault();
+      busy($('#ex-save', page), async () => {
+        const f = $('#exp-add', page), reff = $('#ex-reff', f).value || null;
+        await q(sb.from('receipt_lines').insert({ receipt_id: id, item_id: $('#ex-item', f).value, lot_number: strOrNull($('#ex-lot', f).value),
+          pallets: numOrNull($('#ex-plt', f).value), qty: numOrNull($('#ex-qty', f).value), ref_field: reff, ref_value: reff ? strOrNull($('#ex-refv', f).value) : null, sort_order: exp.length }));
+        await reload(); toast('Expected line added.');
+      });
+    });
 
     /* header save */
     $('#hdr-form', page)?.addEventListener('submit', e => {
@@ -1341,6 +1396,22 @@
       };
       itemSel.addEventListener('change', () => syncItem(true));
       syncItem(false);
+      // fill the receive form from an expected line: item, lot, qty per pallet, and the shared identifier
+      const useExp = l => {
+        itemSel.value = l.item_id; syncItem(false);
+        $('#lot', form).value = l.lot_number || '';
+        if (l.perPallet) $('#qty', form).value = l.perPallet;
+        const key = l.ref_field === 'customer_pallet_id' ? 'cust_id' : l.ref_field;
+        if (key && l.ref_value && $('#' + key, form)) $('#' + key, form).value = l.ref_value;
+        const firstScan = idFields(rcpt.owner_id).find(f => f.key !== key && $('#' + f.key, form));
+        (firstScan ? $('#' + firstScan.key, form) : $('#qty', form)).focus();
+      };
+      $$('[data-use-exp]', page).forEach(b => b.onclick = () => { useExp(exp[Number(b.dataset.useExp)]); form.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+      // keep going on the line being received (same item and lot), else the next one not finished
+      const lr = S.lastReceive || {};
+      const cur = exp.find(l => !l.done && lr.receipt_id === rcpt.id && l.item_id === lr.item_id && (!l.lot_number || l.lot_number === String(lr.lot || '').toUpperCase()));
+      const nextExp = cur || exp.find(l => !l.done);
+      if (nextExp) useExp(nextExp);
       if (!$('#qty', form).value) { const it = itemById(itemSel.value); if (it.units_per_pallet) $('#qty', form).value = Number(it.units_per_pallet); }
 
       // a handheld scanner sends Enter after each scan: step through the
@@ -1352,7 +1423,8 @@
       ids.forEach((f, i) => $('#' + f.key, form).addEventListener('keydown', ev => {
         if (ev.key !== 'Enter') return;
         ev.preventDefault();
-        const next = ids[i + 1];
+        // next identifier still blank (an expected line may have filled some), else receive
+        const next = ids.slice(i + 1).find(f => !$('#' + f.key, form).value.trim());
         if (next) $('#' + next.key, form).focus();
         else form.requestSubmit();
       }));
@@ -1441,7 +1513,8 @@
     }));
     $('#print-rcpt', page)?.addEventListener('click', () =>
       WmsPrint.receipt(rcpt, active.map(p => palletForPrint(p, rcpt)), docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id), billToOf(rcpt.owner_id)));
-    $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id)));
+    $('#print-unload', page)?.addEventListener('click', () => WmsPrint.unloadSheet(rcpt, docSettings(rcpt.warehouse_id, rcpt.owner_id), ownerById(rcpt.owner_id),
+      exp.map(l => ({ sku: l.it.sku, lot: l.lot_number, pallets: l.pallets, qty: l.qty, uom: l.it.uom, ref: l.ref_value ? `${refLabel(l)} ${l.ref_value}` : '' }))));
     $('#done-unload', page)?.addEventListener('click', async () => {
       const ok = await askConfirm('Done unloading?',
         `${active.length} pallet${active.length === 1 ? '' : 's'} received on ${esc(rcpt.receipt_no)}. The office will review and close it.`, 'Done Unloading');
@@ -2355,6 +2428,296 @@
     });
   }
 
+  /* ================================================================== */
+  /* LOAD IMPORT: build tomorrow's inbound / outbound loads from the      */
+  /* customer's schedule sheet, with saved column mappings per account     */
+  /* ================================================================== */
+  const colLetter = i => { let s = '', n = i + 1; while (n) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+  // fields per direction: [key, label, kind]  kind: col | text (col or typed) | acct | wh
+  const LOAD_FIELDS = {
+    inbound: [
+      ['account', 'Account (bill-to)', 'acct'], ['warehouse', 'Warehouse', 'wh'],
+      ['date', 'Appointment date', 'col'], ['time', 'Appointment time', 'col'],
+      ['vendor', 'Shipper / from', 'text'], ['carrier', 'Carrier', 'text'], ['bol', 'BOL / reference #', 'col'],
+      ['po', 'PO #', 'col'], ['trailer', 'Trailer #', 'col'], ['door', 'Dock door', 'col'], ['notes', 'Notes', 'col'],
+      ['item', 'Item / SKU', 'col'], ['lot', 'Lot', 'col'], ['pallets', 'Pallets', 'col'], ['qty', 'Qty (units)', 'col'], ['ref', 'Pallet identifier on every pallet', 'col']
+    ],
+    outbound: [
+      ['account', 'Account (bill-to)', 'acct'], ['warehouse', 'Ship from warehouse', 'wh'],
+      ['date', 'Ship date', 'col'], ['time', 'Appointment time', 'col'],
+      ['shipto', 'Ship to (name)', 'text'], ['addr', 'Ship to address', 'col'], ['city', 'Ship to city', 'col'], ['state', 'Ship to state', 'col'], ['zip', 'Ship to ZIP', 'col'],
+      ['carrier', 'Carrier', 'text'], ['bol', 'Order / reference #', 'col'], ['po', 'PO #', 'col'], ['notes', 'Special instructions', 'col'],
+      ['item', 'Item / SKU', 'col'], ['lot', 'Lot', 'col'], ['pallets', 'Pallets', 'col'], ['qty', 'Qty (units)', 'col']
+    ]
+  };
+  // first-time guesses from the header row (a saved template replaces these)
+  const LOAD_GUESS = [
+    ['date', /date/], ['time', /time/], ['bol', /\bbol\b|bill of lading|\bpro\b|order ?#|order no|load ?#|^reference/],
+    ['carrier', /carrier|scac|trucking/], ['vendor', /shipper|vendor|ship ?from|origin|supplier/],
+    ['shipto', /ship ?to name|consignee|customer name|deliver to name/], ['warehouse', /warehouse|whse|delivery location|destination|^location/], ['ref', /pgid|pallet group/], ['item', /material|sku|item|part|product/],
+    ['lot', /class|lot|bin|batch/], ['pallets', /pallet/], ['qty', /qty|quantity|units|pcs/], ['po', /\bpo\b|purchase/], ['trailer', /trailer/],
+    ['addr', /address/], ['city', /city/], ['state', /state/], ['zip', /zip|postal/], ['notes', /comment|note|instruction/]
+  ];
+  function guessLoadMap(dir, headers) {
+    const used = new Set(), m = {};
+    const keys = LOAD_FIELDS[dir].map(f => f[0]);
+    for (const [k, re] of LOAD_GUESS) {
+      if (!keys.includes(k) || m[k]) continue;
+      const i = headers.findIndex((h, j) => !used.has(j) && re.test(String(h || '').toLowerCase()) && !(k === 'carrier' && /bol/i.test(h)) && !(k === 'qty' && /pallet/i.test(h)));
+      if (i >= 0) { m[k] = { col: i }; used.add(i); }
+    }
+    return m;
+  }
+  function parseTimeCell(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (v instanceof Date) return `${pad2(v.getHours())}:${pad2(v.getMinutes())}`;
+    if (typeof v === 'number' && v < 1) { const mins = Math.round(v * 1440); return `${pad2(Math.floor(mins / 60) % 24)}:${pad2(mins % 60)}`; }
+    const s = String(v).trim().toUpperCase();
+    let m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/);
+    if (m) { let h = Number(m[1]); if (m[3] === 'PM' && h < 12) h += 12; if (m[3] === 'AM' && h === 12) h = 0; return h < 24 && Number(m[2]) < 60 ? `${pad2(h)}:${m[2]}` : 'bad'; }
+    m = s.match(/^(\d{1,2})(\d{2})$/) || s.match(/^(\d{1,2})$/);   // 700, 1330, 7
+    if (m) { const h = Number(m[1]), mi = Number(m[2] || 0); return h < 24 && mi < 60 ? `${pad2(h)}:${pad2(mi)}` : 'bad'; }
+    m = s.match(/^(\d{1,2})\s*(AM|PM)$/);
+    if (m) { let h = Number(m[1]) % 12; if (m[2] === 'PM') h += 12; return `${pad2(h)}:00`; }
+    return 'bad';
+  }
+  function parseLoadDate(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (v instanceof Date) return `${v.getFullYear()}-${pad2(v.getMonth() + 1)}-${pad2(v.getDate())}`;
+    if (typeof v === 'number') return parseDateCell(String(Math.floor(v)));
+    return parseDateCell(String(v).trim().split(/\s+/)[0]);
+  }
+  const cellText = v => v === null || v === undefined ? '' : v instanceof Date ? parseLoadDate(v) : String(v).trim();
+  // "3333 S Zero Street, Fort Smith" -> the warehouse whose code/name/address shares its street number or code
+  function guessWarehouse(val) {
+    const t = String(val || '').toUpperCase();
+    const hay = w => [w.code, w.name, w.address_line1].filter(Boolean).join(' ').toUpperCase();
+    const exact = activeWhs().find(w => t === w.code.toUpperCase() || t === String(w.name || '').toUpperCase());
+    if (exact) return exact.id;
+    const num = (t.match(/\b\d{3,6}\b/) || [])[0];
+    const hits = num ? activeWhs().filter(w => new RegExp(`\\b${num}\\b`).test(hay(w))) : [];
+    if (hits.length === 1) return hits[0].id;
+    const byCode = activeWhs().filter(w => t.includes(w.code.toUpperCase()));
+    return byCode.length === 1 ? byCode[0].id : '';
+  }
+
+  async function viewLoadImport(dir) {
+    if (!can('operator') || isCustomer()) { location.hash = '#/'; return; }
+    dir = dir === 'outbound' ? 'outbound' : 'inbound';
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const templates = await q(sb.from('import_templates').select('*').eq('direction', dir).order('name')).catch(() => []);
+    if (mySeq !== navSeq) return;
+    const fields = LOAD_FIELDS[dir];
+    let grid = null, headers = [], rows = [], tpl = null, map = {}, fileName = '';
+    const lastTpl = loadPref('loadTpl.' + dir, '');
+    render(`
+      <a class="back" href="#/${dir === 'inbound' ? 'receipts' : 'shipments'}">&larr; ${dir === 'inbound' ? 'Receiving' : 'Shipping'}</a>
+      <div class="row spread"><h1>Import ${dir === 'inbound' ? 'Inbound' : 'Outbound'} Loads${multiWh() ? '' : ''}</h1>
+        <div class="seg"><a href="#/loads/import/inbound" class="${dir === 'inbound' ? 'on' : ''}">Inbound</a><a href="#/loads/import/outbound" class="${dir === 'outbound' ? 'on' : ''}">Outbound</a></div></div>
+      <p class="muted">Drop in the customer's schedule sheet. Each row (or each ${dir === 'inbound' ? 'BOL' : 'order #'}) becomes an open ${dir === 'inbound' ? 'receipt with its expected items, ready for the dock to scan' : 'shipment with its order lines'}. Save the column setup once per customer; after that it's pick the file and Create.</p>
+      <div class="card accent">
+        <div class="grid2">
+          <div class="field"><label for="li-tpl">Saved setup</label>
+            <select id="li-tpl"><option value="">New setup (guess from headers)</option>${templates.map(t => `<option value="${t.id}" ${t.id === lastTpl ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></div>
+          <div class="field"><label for="li-file">Schedule sheet (.xlsx or .csv)</label><input id="li-file" type="file" accept=".xlsx,.xls,.csv,text/csv"></div>
+        </div>
+        <details class="more"><summary>Or paste rows (with the header row)</summary><textarea id="li-paste" rows="5" placeholder="Copy from Excel or Google Sheets and paste here"></textarea>
+          <button class="btn secondary sm" id="li-read" type="button" style="margin-top:6px">Read pasted rows</button></details>
+      </div>
+      <div id="li-map"></div>
+      <div id="li-out"></div>`);
+    const out = $('#li-out'), mapBox = $('#li-map');
+    const pickTpl = () => {
+      tpl = templates.find(t => t.id === $('#li-tpl').value) || null;
+      savePref('loadTpl.' + dir, tpl ? tpl.id : '');
+      map = tpl ? JSON.parse(JSON.stringify(tpl.mapping)) : (headers.length ? guessLoadMap(dir, headers) : {});
+      if (!tpl && headers.length && !map.account && activeOwners().length === 1) map.account = { fixed: activeOwners()[0].id };
+    };
+    pickTpl();
+    $('#li-tpl').onchange = () => { pickTpl(); if (grid) drawMap(); };
+
+    const loadGrid = g => {
+      // header row = first row with 3+ filled cells; drop blank rows
+      const hi = Math.max(0, g.findIndex(r => r.filter(c => cellText(c)).length >= 3));
+      headers = (g[hi] || []).map(cellText);
+      rows = g.slice(hi + 1).filter(r => r.some(c => cellText(c)));
+      grid = g;
+      if (!tpl) pickTpl();
+      drawMap();
+    };
+    $('#li-file').onchange = e => busy(null, async () => {
+      const f = e.target.files[0]; if (!f) return;
+      fileName = f.name;
+      if (/\.xlsx?$/i.test(f.name)) {
+        await loadXlsxLib();
+        const wb = window.XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
+        loadGrid(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null, blankrows: false }));
+      } else loadGrid(parseDelimited(await f.text()));
+    });
+    $('#li-read').onclick = () => { fileName = 'pasted rows'; loadGrid(parseDelimited($('#li-paste').value)); };
+
+    const colOpts = (sel, allowText) => `<option value="">— not in sheet —</option>${allowText ? `<option value="__text" ${sel && sel.text !== undefined ? 'selected' : ''}>Same for every load…</option>` : ''}`
+      + headers.map((h, i) => `<option value="${i}" ${sel && sel.col === i ? 'selected' : ''}>${colLetter(i)}: ${esc(h || '(blank)')}</option>`).join('');
+    function drawMap() {
+      const sample = rows[0] || [];
+      mapBox.innerHTML = `
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Columns <span class="muted small">${esc(fileName)} &middot; ${rows.length} row${rows.length === 1 ? '' : 's'}</span></h2>
+            <span class="muted small">Example from row 1 shown on the right</span></div>
+          <div class="li-grid">${fields.map(([k, label, kind]) => {
+            const v = map[k] || {};
+            let ctl;
+            if (kind === 'acct') ctl = `<select data-f="${k}" data-kind="acct"><option value="">— pick —</option>${activeOwners().map(o => `<option value="o:${o.id}" ${v.fixed === o.id ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('')}
+                <optgroup label="From a column (account code)">${headers.map((h, i) => `<option value="c:${i}" ${v.col === i ? 'selected' : ''}>${colLetter(i)}: ${esc(h)}</option>`).join('')}</optgroup></select>`;
+            else if (kind === 'wh') ctl = `<select data-f="${k}" data-kind="wh">${activeWhs().map(w => `<option value="w:${w.id}" ${v.fixed === w.id || (!v.fixed && v.col === undefined && w.id === S.whId) ? 'selected' : ''}>${esc(w.code)} — ${esc(w.name)}</option>`).join('')}
+                <optgroup label="From a column">${headers.map((h, i) => `<option value="c:${i}" ${v.col === i ? 'selected' : ''}>${colLetter(i)}: ${esc(h)}</option>`).join('')}</optgroup></select>`;
+            else ctl = `<select data-f="${k}" data-kind="${kind}">${colOpts(v, kind === 'text')}</select>${kind === 'text' ? `<input data-text="${k}" value="${esc(v.text ?? '')}" placeholder="Type it once" ${v.text !== undefined ? '' : 'hidden'}>` : ''}`;
+            const ex = v.col !== undefined ? cellText(sample[v.col]) : v.text || '';
+            return `<label for="">${esc(label)}</label><div class="li-ctl">${ctl}</div><div class="li-ex muted small">${esc(ex)}</div>`;
+          }).join('')}</div>
+          ${dir === 'inbound' ? `<div class="grid2" style="margin-top:8px">
+            <div class="field"><label for="li-reff">The identifier is the</label><select id="li-reff">${idFields(map.account?.fixed || null).map(f => `<option value="${f.field}" ${(map.ref_field || 'ref1') === f.field ? 'selected' : ''}>${esc(f.label)}</option>`).join('')}</select></div>
+            <div class="field"><label for="li-qtyis">Qty column is</label><select id="li-qtyis"><option value="total">Total for the load</option><option value="per" ${map.qty_is === 'per' ? 'selected' : ''}>Per pallet</option></select></div></div>`
+          : `<div class="field" style="margin-top:8px"><label for="li-qtyis">Qty column is</label><select id="li-qtyis"><option value="total">Total for the order</option><option value="per" ${map.qty_is === 'per' ? 'selected' : ''}>Per pallet</option></select></div>`}
+          <div id="li-whmap"></div>
+          ${tpl ? '' : `<div class="field" style="margin-top:8px"><label for="li-name">Name this setup to reuse it</label><input id="li-name" maxlength="80" placeholder="e.g. One Source daily inbound"></div>`}
+          <div class="btn-row"><button class="btn" id="li-check" type="button">Check</button>
+            <button class="btn secondary" id="li-save" type="button">${tpl ? `Update "${esc(tpl.name)}"` : 'Save setup'}</button></div>
+        </div>`;
+      const readMap = () => {
+        $$('[data-f]', mapBox).forEach(sel => {
+          const k = sel.dataset.f, v = sel.value, kind = sel.dataset.kind;
+          if (kind === 'acct') map[k] = v.startsWith('o:') ? { fixed: v.slice(2) } : v.startsWith('c:') ? { col: Number(v.slice(2)) } : {};
+          else if (kind === 'wh') map[k] = v.startsWith('w:') ? { fixed: v.slice(2) } : { col: Number(v.slice(2)), values: map[k]?.values || {} };
+          else if (v === '__text') map[k] = { text: $(`[data-text="${k}"]`, mapBox).value };
+          else map[k] = v === '' ? {} : { col: Number(v) };
+        });
+        if ($('#li-reff', mapBox)) map.ref_field = $('#li-reff', mapBox).value;
+        map.qty_is = $('#li-qtyis', mapBox).value;
+        $$('[data-whv]', mapBox).forEach(s => { map.warehouse.values = map.warehouse.values || {}; map.warehouse.values[s.dataset.whv] = s.value; });
+      };
+      const drawWh = () => {
+        const box = $('#li-whmap', mapBox);
+        if (map.warehouse?.col === undefined) { box.innerHTML = ''; return; }
+        const vals = [...new Set(rows.map(r => cellText(r[map.warehouse.col])).filter(Boolean))];
+        map.warehouse.values = map.warehouse.values || {};
+        box.innerHTML = vals.length ? `<h3 style="margin-top:12px">Which warehouse is which?</h3>${vals.map(v => `
+          <div class="row" style="gap:8px;margin-bottom:6px"><span style="flex:1">${esc(v)}</span>
+            <select data-whv="${esc(v)}"><option value="">— skip these —</option>${activeWhs().map(w => `<option value="${w.id}" ${(map.warehouse.values[v] ?? guessWarehouse(v)) === w.id ? 'selected' : ''}>${esc(w.code)} — ${esc(w.name)}</option>`).join('')}</select></div>`).join('')}` : '';
+      };
+      $$('[data-f]', mapBox).forEach(sel => sel.addEventListener('change', () => {
+        const t = $(`[data-text="${sel.dataset.f}"]`, mapBox); if (t) t.hidden = sel.value !== '__text';
+        readMap(); if (sel.dataset.f === 'warehouse') drawWh(); if (sel.dataset.f === 'account') drawMap();
+      }));
+      drawWh();
+      $('#li-check', mapBox).onclick = () => busy($('#li-check', mapBox), async () => { readMap(); await checkLoads(); });
+      $('#li-save', mapBox).onclick = () => busy($('#li-save', mapBox), async () => {
+        readMap();
+        const name = tpl ? tpl.name : ($('#li-name', mapBox).value.trim() || `${ownerById(map.account?.fixed).code || 'Customer'} ${dir}`);
+        if (tpl) await q(sb.from('import_templates').update({ mapping: map, owner_id: map.account?.fixed || null, updated_at: new Date().toISOString() }).eq('id', tpl.id));
+        else { const [t] = await q(sb.from('import_templates').insert({ name, direction: dir, owner_id: map.account?.fixed || null, mapping: map }).select()); templates.push(t); tpl = t; savePref('loadTpl.' + dir, t.id); }
+        toast(`Setup "${name}" saved.`);
+        const sel = $('#li-tpl'); sel.innerHTML = `<option value="">New setup (guess from headers)</option>${templates.map(t => `<option value="${t.id}" ${t.id === tpl.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}`;
+        drawMap();
+      });
+    }
+
+    async function checkLoads() {
+      const get = (r, k) => { const m = map[k] || {}; return m.text !== undefined ? m.text.trim() : m.col !== undefined ? r[m.col] : null; };
+      const groups = new Map();
+      rows.forEach((r, i) => {
+        const key = cellText(get(r, 'bol')) || `row-${i}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ r, i: i + 1 });
+      });
+      // existing loads with the same reference (not void) are skipped
+      const refs = [...groups.keys()].filter(k => !k.startsWith('row-'));
+      const existing = new Set();
+      if (refs.length) {
+        const col = dir === 'inbound' ? 'inbound_bol' : 'customer_order_no';
+        const hit = await fetchIn(refs, chunk => () => sb.from(dir === 'inbound' ? 'receipts' : 'shipments').select(`${col}, owner_id`).in(col, chunk).neq('status', 'void').order(col));
+        hit.forEach(h => existing.add(h.owner_id + '|' + String(h[col]).toUpperCase()));
+      }
+      const loads = [];
+      for (const [key, list] of groups) {
+        const first = list[0].r, errs = [];
+        const acct = map.account?.fixed ? ownerById(map.account.fixed) : (S.owners || []).find(o => o.code.toUpperCase() === cellText(get(first, 'account')).toUpperCase()) || {};
+        if (!acct.id) errs.push(map.account?.fixed || map.account?.col !== undefined ? `Account "${cellText(get(first, 'account'))}" not found` : 'Pick the account');
+        let whId = map.warehouse?.fixed || null;
+        let skipWh = false;
+        if (map.warehouse?.col !== undefined) {
+          const v = cellText(first[map.warehouse.col]), set = (map.warehouse.values || {})[v];
+          if (set === '') skipWh = true;                       // "skip these" picked for this location
+          whId = set || guessWarehouse(v);
+          if (!whId && !skipWh) errs.push(`Warehouse "${v}" not matched`);
+        }
+        const date = parseLoadDate(get(first, 'date')), time = parseTimeCell(get(first, 'time'));
+        if (date === 'bad') errs.push(`Can't read the date "${cellText(get(first, 'date'))}"`);
+        if (time === 'bad') errs.push(`Can't read the time "${cellText(get(first, 'time'))}"`);
+        const lines = list.map(({ r, i }) => {
+          const sku = cellText(get(r, 'item')).toUpperCase();
+          if (!sku) return null;
+          const it = acct.id ? (S.items || []).find(x => x.owner_id === acct.id && x.sku.toUpperCase() === sku && x.active) : null;
+          if (acct.id && !it) errs.push(`Row ${i}: SKU ${sku} is not set up for ${acct.code}`);
+          const pallets = numCell(get(r, 'pallets')), qtyRaw = numCell(get(r, 'qty'));
+          const qty = qtyRaw && map.qty_is === 'per' && pallets ? qtyRaw * pallets : qtyRaw;
+          return { item: it, sku, lot: cellText(get(r, 'lot')) || null, pallets: pallets ? Math.round(pallets) : null, qty: qty || null, ref: cellText(get(r, 'ref')) || null };
+        }).filter(Boolean);
+        const ref = key.startsWith('row-') ? null : key;
+        const dup = ref && acct.id && existing.has(acct.id + '|' + ref.toUpperCase());
+        loads.push({ key, rows: list.map(x => x.i), acct, whId, date: date === 'bad' ? null : date, time: time === 'bad' ? null : time, ref,
+          vendor: cellText(get(first, 'vendor')) || null, shipto: cellText(get(first, 'shipto')) || null, carrier: cellText(get(first, 'carrier')) || null,
+          po: cellText(get(first, 'po')) || null, trailer: cellText(get(first, 'trailer')) || null, door: cellText(get(first, 'door')) || null,
+          notes: cellText(get(first, 'notes')) || null, addr: cellText(get(first, 'addr')) || null, city: cellText(get(first, 'city')) || null,
+          state: cellText(get(first, 'state')) || null, zip: cellText(get(first, 'zip')) || null, lines,
+          status: skipWh ? 'skip' : errs.length ? 'error' : dup ? 'dup' : 'new', errs });
+        if (dir === 'outbound' && !loads[loads.length - 1].shipto && loads[loads.length - 1].status === 'new') { loads[loads.length - 1].status = 'error'; loads[loads.length - 1].errs.push('Ship-to name is blank'); }
+      }
+      const n = s => loads.filter(l => l.status === s).length;
+      const fmtWhen = l => [l.date ? fmtDate(l.date) : '', l.time ? fmtTime(l.time) : ''].filter(Boolean).join(' ');
+      out.innerHTML = `
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Check: ${loads.length} load${loads.length === 1 ? '' : 's'}</h2>
+            <span>${n('new')} new${n('dup') ? ` &middot; ${n('dup')} already in` : ''}${n('error') ? ` &middot; <span style="color:var(--bad)">${n('error')} with problems</span>` : ''}</span></div>
+          <div class="table-wrap" style="margin-top:10px"><table class="data">
+            <thead><tr><th></th><th>${dir === 'inbound' ? 'BOL / ref' : 'Order / ref'}</th><th>When</th>${multiWh() ? '<th>Warehouse</th>' : ''}<th>${dir === 'inbound' ? 'From' : 'Ship to'}</th><th>Carrier</th><th>Items</th></tr></thead>
+            <tbody>${loads.map(l => `<tr class="${l.status === 'error' ? 'imp-err' : ''}">
+              <td>${l.status === 'new' ? '<span class="badge open">new</span>' : l.status === 'dup' ? '<span class="badge">already in</span>' : l.status === 'error' ? '<span class="badge void">fix</span>' : '<span class="badge">skip</span>'}</td>
+              <td><strong>${esc(l.ref || '-')}</strong>${l.acct.code ? `<div class="muted small">${esc(l.acct.code)}</div>` : ''}</td><td>${esc(fmtWhen(l))}</td>
+              ${multiWh() ? `<td>${esc(whById(l.whId).code || '')}</td>` : ''}<td>${esc(dir === 'inbound' ? l.vendor || '' : l.shipto || '')}</td><td>${esc(l.carrier || '')}</td>
+              <td class="small">${l.lines.map(x => `${esc(x.sku)}${x.lot ? ' / ' + esc(x.lot) : ''}${x.pallets ? ` &middot; ${x.pallets} plt` : ''}${x.qty ? ` &middot; ${esc(fmtQty(x.qty))}` : ''}${x.ref ? ` &middot; ${esc(x.ref)}` : ''}`).join('<br>')}
+                ${l.errs.length ? `<div style="color:var(--bad)">${l.errs.map(esc).join('<br>')}</div>` : ''}</td></tr>`).join('')}</tbody></table></div>
+          ${n('new') ? `<div class="btn-row"><button class="btn" id="li-go">Create ${n('new')} ${dir === 'inbound' ? 'receipt' : 'shipment'}${n('new') === 1 ? '' : 's'}</button></div>` : ''}
+        </div>`;
+      $('#li-go', out)?.addEventListener('click', () => busy($('#li-go', out), async () => {
+        let done = 0; const made = [];
+        for (const l of loads.filter(x => x.status === 'new')) {
+          const when = l.date ? new Date(`${l.date}T${l.time || '08:00'}:00`).toISOString() : null;
+          if (dir === 'inbound') {
+            const [rc] = await q(sb.from('receipts').insert({ owner_id: l.acct.id, warehouse_id: l.whId || S.whId, vendor_name: l.vendor, carrier: l.carrier, inbound_bol: l.ref,
+              po_number: l.po, trailer_no: l.trailer, dock_door: l.door, notes: l.notes, expected_at: when }).select());
+            const lines = l.lines.filter(x => x.item).map((x, i) => ({ receipt_id: rc.id, item_id: x.item.id, lot_number: x.lot, pallets: x.pallets, qty: x.qty,
+              ref_field: x.ref ? map.ref_field || 'ref1' : null, ref_value: x.ref, sort_order: i }));
+            if (lines.length) await q(sb.from('receipt_lines').insert(lines));
+            made.push(rc);
+          } else {
+            const [sh] = await q(sb.from('shipments').insert({ owner_id: l.acct.id, warehouse_id: l.whId || S.whId, ship_to_name: l.shipto, ship_to_address1: l.addr, ship_to_city: l.city,
+              ship_to_state: l.state, ship_to_zip: l.zip, carrier: l.carrier, customer_order_no: l.ref, po_number: l.po, special_instructions: l.notes,
+              ship_date: l.date || todayIso(), appt_time: l.time }).select());
+            const lines = l.lines.filter(x => x.item).map(x => ({ shipment_id: sh.id, item_id: x.item.id, lot_number: x.lot, pallets_ordered: x.pallets, qty_ordered: x.qty }));
+            if (lines.length) await q(sb.from('shipment_order_lines').insert(lines));
+            made.push(sh);
+          }
+          done++;
+        }
+        toast(`${done} ${dir === 'inbound' ? 'receipt' : 'shipment'}${done === 1 ? '' : 's'} created.`);
+        out.innerHTML = `<div class="notice ok"><strong>Created ${done}:</strong> ${made.map(m => `<a href="#/${dir === 'inbound' ? 'receipt' : 'shipment'}/${m.id}">${esc(m.receipt_no || m.shipment_no)}</a>`).join(', ')}.
+          They're on the <a href="#/schedule">Schedule</a>.</div>`;
+      }));
+    }
+  }
+
   async function palletModal(p, onChange) {
     const body = openModal(p.lp_id, `<div class="loading">Loading...</div>`);
     const hist = await q(sb.from('v_transactions').select('*').eq('lp_id', p.lp_id).order('id', { ascending: false }).limit(50));
@@ -3036,7 +3399,7 @@
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <div class="row spread"><h1>${isCustomer() ? "Shipments" : "Shipping"}${multiWh() ? ' <span class="wh-tag">' + esc(whById(S.whId).code) + '</span>' : ''}</h1>
-        ${can('operator') ? `<a class="btn" href="#/shipment/new">New Shipment</a>` : ''}</div>
+        ${can('operator') ? `<span class="row" style="gap:8px"><a class="btn secondary" href="#/loads/import/outbound">Import Loads</a><a class="btn" href="#/shipment/new">New Shipment</a></span>` : ''}</div>
       <h2>Open</h2>
       ${open.length ? `<div class="list mlist">${open.map(item).join('')}</div>${table(open)}` : `<p class="muted">No open shipments.</p>`}
       <h2 style="margin-top:20px">Recent</h2>

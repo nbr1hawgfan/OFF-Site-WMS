@@ -436,7 +436,7 @@ const WmsPrint = (() => {
   }
 
   /* Unload sheet: for scheduled inbound trucks */
-  function unloadSheet(rcpt, settings, owner) {
+  function unloadSheet(rcpt, settings, owner, expected = []) {
     const s = settings || {};
     const lotLbl = lotLabel(s).split(' /')[0];
     const html = sheetCss + `
@@ -458,7 +458,9 @@ const WmsPrint = (() => {
         ${rcpt.notes ? `<div class="note"><strong>Notes:</strong> ${esc(rcpt.notes)}</div>` : ''}
         <table>
           <thead><tr><th>SKU</th><th>${esc(lotLbl)}</th><th class="num">Pallets</th><th class="num">Qty</th><th>Damage / notes</th></tr></thead>
-          <tbody>${'<tr><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(8)}</tbody>
+          <tbody>${expected.map(x => `<tr><td><strong>${esc(x.sku)}</strong>${x.ref ? `<div style="font-size:9pt">${esc(x.ref)}</div>` : ''}</td><td><strong>${esc(x.lot || '')}</strong></td>
+            <td class="num">${esc(x.pallets ?? '')}</td><td class="num">${x.qty ? esc(fmtQty(x.qty) + ' ' + (x.uom || '')) : ''}</td><td></td></tr>`).join('')}
+            ${'<tr><td></td><td></td><td></td><td></td><td></td></tr>'.repeat(Math.max(2, 8 - expected.length))}</tbody>
         </table>
         <div class="sign"><div>Unloaded by</div><div>Seal # verified / time</div></div>
         <div class="foot">Scan the barcode above in Dock Mode &gt; Unload. Printed ${esc(fmtDateTime(new Date()))}</div>
