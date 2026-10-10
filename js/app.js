@@ -357,9 +357,10 @@
     while (contrast(c, '#ffffff') < 4.5 && i++ < 20) c = mixHex(hex, '#000000', i * .05);
     return c;
   }
-  function applyTheme(t = { theme: S.settings?.theme, accent: S.settings?.accent_color }) {
+  function applyTheme(t = { theme: S.settings?.theme, accent: S.settings?.accent_color, buttons: S.settings?.button_style }) {
     const modern = t.theme === 'modern';
     document.body.classList.toggle('theme-modern', modern);
+    document.body.classList.toggle('btn-glass', t.buttons === 'glass');
     const brand = /^#[0-9A-Fa-f]{6}$/.test(t.accent || '') ? t.accent.toLowerCase() : '#00667d';
     const acc = readableAccent(brand);
     const root = document.body.style;
@@ -367,7 +368,7 @@
     else ['--accent', '--accent-brand', '--accent-dark', '--accent-tint'].forEach(k => root.removeProperty(k));
     document.querySelector('meta[name=theme-color]')?.setAttribute('content', modern ? '#ffffff' : '#C41230');
     window.WMS_DOC_ACCENT = modern ? acc : '#C41230';
-    savePref('theme', { theme: t.theme || 'lwh', accent: acc });
+    savePref('theme', { theme: t.theme || 'lwh', accent: acc, buttons: t.buttons || 'flat' });
   }
 
   async function loadRef() {
@@ -2092,7 +2093,8 @@
     const m = String(l.code).toUpperCase().match(/^[A-Z]+/);
     return m ? m[0] : '#';
   }
-  const capOf = l => l.capacity || whById(l.warehouse_id).default_capacity || null;
+  const isRack = l => !!(l.rack_tiers && l.rack_per_tier);
+  const capOf = l => isRack(l) ? l.rack_tiers * l.rack_per_tier : l.capacity || whById(l.warehouse_id).default_capacity || null;
 
   async function viewBayMap() {
     if (isLift()) { location.hash = '#/dock'; return; }
@@ -2128,7 +2130,20 @@
     const used = tiles.filter(t => t.n).length, capTotal = tiles.reduce((a, t) => a + (t.cap || 0), 0), palletsIn = tiles.reduce((a, t) => a + t.n, 0);
     const legend = mode === 'fill' ? ['Up to 25% full', '26-50%', '51-75%', '76-99%', 'Full'] : mode === 'age'
       ? ['Oldest pallet 0-30 days', '31-60', '61-90', '91-180', '181+ days'] : ['1 pallet', '2-4', '5-9', '10-19', '20+'];
+    const rackHtml = t => {
+      const fill = t.step < 0 ? '' : t.over ? MAP_OVER : MAP_RAMP[Math.min(t.step, 4)];
+      const per = t.l.rack_per_tier, tiers = t.l.rack_tiers;
+      // positions fill from the floor up (the system knows pallets per bay, not which level)
+      const rowsHtml = Array.from({ length: tiers }, (_, r) => tiers - 1 - r).map(tier => `<div class="rk-tier">${Array.from({ length: per }, (_, c) => {
+        const idx = tier * per + c;
+        return `<span class="rk-slot ${idx < t.n ? 'on' : ''}" style="${idx < t.n ? `background:${fill};border-color:${fill}` : ''}"></span>`; }).join('')}</div>`).join('');
+      const tip = `${t.l.code}: rack ${tiers} tiers × ${per} = ${t.cap} positions · ${t.n} pallet${t.n === 1 ? '' : 's'}${t.n ? ', oldest ' + t.oldest + ' days' : ''}`;
+      return `<button type="button" class="bay rack ${t.dim ? 'dim' : ''} ${pref.acct && t.mine.length ? 'hit' : ''} ${t.over ? 'over' : ''}" data-bay="${t.l.id}" title="${esc(tip)}" aria-label="${esc(tip)}" style="--per:${per}">
+        <span class="rk-head"><span class="bay-code">${esc(t.l.code)}</span><span class="bay-n">${t.over ? '! ' : ''}${t.n}/${t.cap}</span></span>
+        <span class="rk-frame">${rowsHtml}</span></button>`;
+    };
     const tileHtml = t => {
+      if (isRack(t.l)) return rackHtml(t);
       const bg = t.step < 0 ? '' : t.over ? MAP_OVER : MAP_RAMP[t.step];
       const style = bg ? `background:${bg};color:${inkOn(bg)};border-color:${bg}` : '';
       const tip = `${t.l.code}: ${t.n} pallet${t.n === 1 ? '' : 's'}${t.cap ? ' of ' + t.cap : ''}${t.n ? ', oldest ' + t.oldest + ' days' : ''}`;
@@ -2148,11 +2163,14 @@
           <div class="kpi"><div class="kpi-label">Bays in use</div><div class="kpi-value">${used} / ${tiles.length}</div><div class="kpi-sub">${tiles.length - used} empty</div></div>
           <div class="kpi"><div class="kpi-label">Pallets in bays</div><div class="kpi-value">${palletsIn.toLocaleString()}</div><div class="kpi-sub">${pallets.length - palletsIn ? (pallets.length - palletsIn) + ' elsewhere' : '&nbsp;'}</div></div>
           ${capTotal ? `<div class="kpi"><div class="kpi-label">Space used</div><div class="kpi-value">${Math.round(palletsIn / capTotal * 100)}%</div><div class="kpi-sub">${(capTotal - palletsIn).toLocaleString()} open positions</div></div>` : ''}
+          ${tiles.some(t => isRack(t.l)) ? (r => `<div class="kpi"><div class="kpi-label">Rack positions</div><div class="kpi-value">${r.used} / ${r.cap}</div><div class="kpi-sub">${r.cap ? Math.round(r.used / r.cap * 100) : 0}% full &middot; ${r.cap - r.used} open</div></div>`)(
+            tiles.filter(t => isRack(t.l)).reduce((a, t) => ({ used: a.used + Math.min(t.n, t.cap), cap: a.cap + t.cap }), { used: 0, cap: 0 })) : ''}
           ${capTotal ? `<div class="kpi"><div class="kpi-label">Full or over</div><div class="kpi-value">${tiles.filter(t => t.cap && t.n >= t.cap).length}</div><div class="kpi-sub">${tiles.filter(t => t.over).length} over capacity</div></div>` : ''}
         </div>
         ${!hasCap && can('manager') && !isCustomer() ? `<div class="notice">Set how many pallets each bay holds in <a href="#/setup/locations">Setup &gt; Locations</a> to see how full the building is.</div>` : ''}
         <div class="map-legend"><span class="sw empty"></span>Empty${legend.map((t, i) => `<span class="sw" style="background:${MAP_RAMP[i]}"></span>${esc(t)}`).join('')}
-          ${mode === 'fill' ? `<span class="sw" style="background:${MAP_OVER}"></span>! Over capacity` : ''}</div>
+          ${mode === 'fill' ? `<span class="sw" style="background:${MAP_OVER}"></span>! Over capacity` : ''}
+          ${tiles.some(t => isRack(t.l)) ? '<span class="rk-key"><span class="rk-slot on"></span><span class="rk-slot"></span></span>Rack positions, floor at the bottom (filled from the floor up)' : ''}</div>
         ${groupKeys.map(k => `<section class="bay-group"><h2>${esc(k)} <span class="muted small">${groups[k].filter(t => t.n).length}/${groups[k].length} in use</span></h2>
           <div class="bays">${groups[k].map(tileHtml).join('')}</div></section>`).join('') || '<p class="muted">No locations set up in this warehouse.</p>'}
       </div>`);
@@ -2162,7 +2180,7 @@
     $('#map-all').onchange = e => { pref.types = e.target.checked ? 'all' : 'storage'; save(); };
     $$('[data-bay]').forEach(b => b.onclick = () => {
       const t = tiles.find(x => x.l.id === b.dataset.bay);
-      const body = openModal(`${t.l.code}${t.cap ? ` — ${t.n} of ${t.cap} pallets` : ` — ${t.n} pallet${t.n === 1 ? '' : 's'}`}`, t.n ? `
+      const body = openModal(`${t.l.code}${isRack(t.l) ? ` — rack ${t.l.rack_tiers} × ${t.l.rack_per_tier}` : ''}${t.cap ? ` — ${t.n} of ${t.cap} pallets` : ` — ${t.n} pallet${t.n === 1 ? '' : 's'}`}`, t.n ? `
         <div class="table-wrap"><table class="data"><thead><tr><th>Pallet</th><th>SKU</th><th>${esc(lbl.lotShort())}</th><th class="num">Qty</th><th class="num">Days</th>${multiOwner() ? '<th>Account</th>' : ''}</tr></thead>
         <tbody>${t.ps.slice().sort((a, b) => daysOld(b.received_at) - daysOld(a.received_at)).map(p => `<tr data-href="#/pallet/${p.pallet_id}" style="cursor:pointer">
           <td><a href="#/pallet/${p.pallet_id}">${esc(p.lp_id)}</a>${p.customer_pallet_id ? `<div class="muted small">${esc(p.customer_pallet_id)}</div>` : ''}${p.status === 'hold' ? ' ' + badge('hold') : ''}</td>
@@ -4723,6 +4741,11 @@
             <div class="row" style="gap:6px"><input id="cap-pre" maxlength="20" autocapitalize="characters" placeholder="MR" style="flex:1">
               <input id="cap-n" type="number" inputmode="numeric" min="1" step="1" placeholder="pallets" style="width:110px"></div></div>
         </div>
+        ${'rack_tiers' in (locs[0] || {}) ? `<div class="field"><label for="rk-pre">Racking: bays starting with</label>
+          <div class="row" style="gap:6px;flex-wrap:wrap"><input id="rk-pre" maxlength="20" autocapitalize="characters" placeholder="R" style="flex:1;min-width:90px">
+            <span>are racks with</span><input id="rk-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" placeholder="4" style="width:80px"><span>tiers (counting the floor) ×</span>
+            <input id="rk-per" type="number" inputmode="numeric" min="1" max="8" step="1" placeholder="2" style="width:80px"><span>pallets per tier</span></div>
+          <div class="hint">Leave tiers blank to turn those bays back into floor bays.</div></div>` : ''}
         <button class="btn secondary block" id="cap-save">Save Capacity</button>
         <div class="hint">Tap a location below to set one bay. A blank bay uses the "most bays" number.</div>
       </form>` : ''}
@@ -4742,7 +4765,7 @@
       ${locs.map(l => `
         <div class="list-item row spread" style="${l.active ? '' : 'opacity:.55'}">
           <div><a href="#" class="title" data-loc="${l.id}">${esc(l.code)}</a>
-            <div class="meta">${esc(l.loc_type)}${l.zone ? ' &middot; ' + esc(l.zone) : ''}${l.capacity ? ' &middot; holds ' + l.capacity : ''}</div></div>
+            <div class="meta">${esc(l.loc_type)}${l.zone ? ' &middot; ' + esc(l.zone) : ''}${isRack(l) ? ` &middot; rack ${l.rack_tiers} × ${l.rack_per_tier} = ${l.rack_tiers * l.rack_per_tier}` : l.capacity ? ' &middot; holds ' + l.capacity : ''}</div></div>
           ${['DOCK', 'FLOOR', 'HOLD'].includes(l.code) ? '<span class="muted small">built-in</span>'
             : `<button class="btn sm ghost" data-toggle="${l.id}">${l.active ? 'Deactivate' : 'Activate'}</button>`}
         </div>`).join('')}`;
@@ -4764,6 +4787,14 @@
         const def = numOrNull($('#cap-def', out).value), pre = $('#cap-pre', out).value.trim().toUpperCase(), n = numOrNull($('#cap-n', out).value);
         await q(sb.from('warehouses').update({ default_capacity: def ? Math.round(def) : null }).eq('id', S.whId));
         let msg = 'Default capacity saved.';
+        const rkPre = ($('#rk-pre', out)?.value || '').trim().toUpperCase().replace(/[%_]/g, '');
+        if (rkPre) {
+          const tiers = numOrNull($('#rk-tiers', out).value), per = numOrNull($('#rk-per', out).value);
+          if (tiers && !per) throw new Error('How many pallets fit on each tier?');
+          const hit = await q(sb.from('locations').update({ rack_tiers: tiers ? Math.round(tiers) : null, rack_per_tier: tiers ? Math.round(per) : null })
+            .eq('warehouse_id', S.whId).ilike('code', rkPre + '%').select('id'));
+          msg = tiers ? `${hit.length} ${rkPre} bay${hit.length === 1 ? '' : 's'} set as racks: ${Math.round(tiers)} tiers × ${Math.round(per)}.` : `${hit.length} ${rkPre} bays set back to floor bays.`;
+        }
         if (pre) {
           if (!n) throw new Error(`How many pallets do ${pre} bays hold?`);
           const hit = await q(sb.from('locations').update({ capacity: Math.round(n) }).eq('warehouse_id', S.whId).ilike('code', pre.replace(/[%_]/g, '') + '%').select('id'));
@@ -4777,7 +4808,9 @@
       const l = S.locations.find(x => x.id === a.dataset.loc);
       const body = openModal(`Location ${l.code}`, `<form id="lf">
         <div class="grid2">
-          <div class="field"><label for="lf-cap">Holds <span class="muted small">(pallets, blank = default)</span></label><input id="lf-cap" type="number" inputmode="numeric" min="1" step="1" value="${esc(l.capacity ?? '')}"></div>
+          <div class="field"><label for="lf-cap">Holds <span class="muted small">(floor bay pallets, blank = default)</span></label><input id="lf-cap" type="number" inputmode="numeric" min="1" step="1" value="${esc(l.capacity ?? '')}"></div>
+          ${'rack_tiers' in l ? `<div class="field"><label for="lf-tiers">Rack tiers <span class="muted small">(counting floor; blank = not a rack)</span></label><input id="lf-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" value="${esc(l.rack_tiers ?? '')}"></div>
+          <div class="field"><label for="lf-per">Pallets per tier</label><input id="lf-per" type="number" inputmode="numeric" min="1" max="8" step="1" value="${esc(l.rack_per_tier ?? '')}"></div>` : ''}
           <div class="field"><label for="lf-zone">Zone <span class="muted small">(groups the Bay Map)</span></label><input id="lf-zone" value="${esc(l.zone || '')}" maxlength="30"></div>
           <div class="field"><label for="lf-type">Type</label><select id="lf-type">${['storage', 'floor', 'staging', 'dock', 'hold'].map(t => `<option ${l.loc_type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
           <div class="field"><label for="lf-sort">Sort order</label><input id="lf-sort" type="number" inputmode="numeric" value="${esc(l.sort_order ?? 0)}"></div>
@@ -4786,7 +4819,10 @@
         ev.preventDefault();
         busy($('#lf-save', body), async () => {
           const cap = numOrNull($('#lf-cap', body).value);
-          await q(sb.from('locations').update({ capacity: cap ? Math.round(cap) : null, zone: strOrNull($('#lf-zone', body).value),
+          const tiers = $('#lf-tiers', body) ? numOrNull($('#lf-tiers', body).value) : undefined, per = $('#lf-per', body) ? numOrNull($('#lf-per', body).value) : undefined;
+          if (tiers && !per) throw new Error('How many pallets fit on each tier?');
+          await q(sb.from('locations').update({ ...(tiers !== undefined ? { rack_tiers: tiers ? Math.round(tiers) : null, rack_per_tier: tiers ? Math.round(per) : null } : {}),
+            capacity: cap ? Math.round(cap) : null, zone: strOrNull($('#lf-zone', body).value),
             loc_type: $('#lf-type', body).value, sort_order: Number($('#lf-sort', body).value) || 0 }).eq('id', l.id));
           closeModal(); toast(`${l.code} saved.`); viewSetup('locations');
         });
@@ -5527,6 +5563,8 @@
           <div class="field"><label for="c-accent">Accent color (Modern)</label>
             <div class="row" style="flex-wrap:nowrap"><input id="c-accent-pick" type="color" value="${esc(s.accent_color || '#00667D')}" style="width:56px;padding:2px">
               <input id="c-accent" value="${esc(s.accent_color || '#00667D')}" maxlength="7" pattern="#[0-9A-Fa-f]{6}" placeholder="#00667D"></div></div>
+          ${'button_style' in s ? `<div class="field"><label for="c-btns">Buttons</label>
+            <select id="c-btns"><option value="flat">Flat</option><option value="glass" ${s.button_style === 'glass' ? 'selected' : ''}>Glass (glossy)</option></select></div>` : ''}
         </div>
         <p class="hint" style="margin-top:-4px">Changes the app for everyone and the accent line on printed documents. Phones and Dock Mode keep bold text either way.</p>` : ''}
         <button class="btn block" id="co-save">Save</button>
@@ -5551,6 +5589,7 @@
           const acc = $('#c-accent', out).value.trim();
           if (acc && !/^#[0-9A-Fa-f]{6}$/.test(acc)) throw new Error('Accent color must look like #00667D.');
           row.theme = $('#c-theme', out).value; row.accent_color = acc ? acc.toUpperCase() : null;
+          if ($('#c-btns', out)) row.button_style = $('#c-btns', out).value;
         }
         await q(sb.from('settings').update(row).eq('id', 1));
         S.settings = { ...S.settings, ...row }; applyTheme();

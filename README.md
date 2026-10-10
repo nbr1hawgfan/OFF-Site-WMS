@@ -3,6 +3,19 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.9.0 rack bays + glass buttons** (migration 019):
+- **Rack bays:** mark bays as racking with tiers (counting the floor) ×
+  pallets per tier, either in bulk ("bays starting with R are racks: 4 tiers ×
+  2") or per bay in Setup > Locations.
+  - **On the Bay Map:** each rack bay is drawn as a small rack elevation with
+    its positions filled from the floor up. The system knows pallets per bay,
+    not per level.
+  - **Totals:** a "Rack positions" figure shows used, open and % full. Floor bays
+    keep the "most bays hold N" capacity.
+- **Glass buttons:** Setup > Company > Buttons: Glass gives buttons, tiles and
+  dock tiles a glossy look in either theme. Text stays readable with any accent
+  color.
+
 **v1.8.0 load import** (migration 018): Receiving / Shipping > Import Loads.
 - **What it does:** drop in the customer's schedule sheet (.xlsx, .csv or
   pasted rows).
@@ -251,7 +264,7 @@ sheet with row counts. Meant as a monthly off-site copy of the records.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–018 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–019 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files
