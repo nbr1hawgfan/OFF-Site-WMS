@@ -161,6 +161,7 @@ table.data th, table.data td { text-align: left; padding: 8px 6px; border-bottom
 table.data th { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
 table.data td.num, table.data th.num { text-align: right; }
 .table-wrap { overflow-x: auto; }
+table.data tfoot td { font-weight: 800; border-top: 2px solid var(--black); border-bottom: 0; }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 16px; }
 .kv dt { color: var(--muted); }

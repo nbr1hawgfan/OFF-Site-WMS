@@ -4747,40 +4747,72 @@
     if (isLift() || !can('viewer')) { location.hash = '#/'; return; }
     const today = new Date();
     const first = new Date(today.getFullYear(), today.getMonth(), 1);
+    const F = { wh: multiWh() ? S.whId : '', acct: '', sku: '', from: ymd(first), to: ymd(today), detail: 'item', ...loadPref('rptFilter', {}) };
+    if (F.wh && !activeWhs().some(w => w.id === F.wh)) F.wh = S.whId;
+    if (F.acct && !activeOwners().some(o => o.id === F.acct)) F.acct = '';
+    const presets = [['month', 'This month'], ['last', 'Last month'], ['30', 'Last 30 days'], ['ytd', 'Year to date']];
+    const skuList = () => [...new Set(S.items.filter(i => !F.acct || i.owner_id === F.acct).map(i => i.sku))].sort();
     render(`
       <a class="back" href="#/">&larr; Home</a>
       <h1>Reports</h1>
-      <p class="muted">Downloads open in Excel. Customer field names (${esc(idHeaders().concat(lbl.lotShort()).join(', '))}) are used as column headers.</p>
 
-      <div class="card accent">
-        <h2>Inventory on hand</h2>
-        <div class="btn-row">
-          <button class="btn" data-rpt="pallets">By pallet</button>
-          <button class="btn secondary" data-rpt="lots">By item &amp; ${esc(lbl.lotShort().toLowerCase())}</button>
+      <div class="card accent" id="rpt-filters">
+        <h2 style="margin-bottom:6px">Filters</h2>
+        <p class="muted small" style="margin-top:0">Every report below follows these.</p>
+        <div class="filter-row">
+          ${multiWh() ? `<div class="field"><label for="rf-wh">Warehouse</label><select id="rf-wh"><option value="">All warehouses</option>
+            ${activeWhs().map(w => `<option value="${w.id}" ${w.id === F.wh ? 'selected' : ''}>${esc(w.code)} — ${esc(w.name)}</option>`).join('')}</select></div>` : ''}
+          ${multiOwner() ? `<div class="field"><label for="rf-acct">Account</label><select id="rf-acct"><option value="">All accounts</option>
+            ${activeOwners().map(o => `<option value="${o.id}" ${o.id === F.acct ? 'selected' : ''}>${esc(o.code)} — ${esc(o.name)}</option>`).join('')}</select></div>` : ''}
+          <div class="field"><label for="rf-sku">Item / SKU</label><input id="rf-sku" value="${esc(F.sku)}" list="rf-skus" placeholder="All items" autocomplete="off" autocapitalize="characters"></div>
+          <datalist id="rf-skus">${skuList().map(s => `<option value="${esc(s)}"></option>`).join('')}</datalist>
+          <div class="field"><label for="rf-from">From</label><input id="rf-from" type="date" value="${esc(F.from)}"></div>
+          <div class="field"><label for="rf-to">Through</label><input id="rf-to" type="date" value="${esc(F.to)}"></div>
+          <div class="field"><label for="rf-detail">Detail</label><select id="rf-detail"><option value="item">By item</option>
+            <option value="lot" ${F.detail === 'lot' ? 'selected' : ''}>By item &amp; ${esc(lbl.lotShort().toLowerCase())}</option></select></div>
         </div>
-        <div class="hint">Right now, including allocated quantities and locations.</div>
+        <div class="row" style="gap:6px;margin-top:4px">${presets.map(([k, l]) => `<button type="button" class="btn ghost sm" data-preset="${k}">${l}</button>`).join('')}</div>
       </div>
 
       <div class="card">
-        <h2>Activity for a date range</h2>
-        <div class="grid2">
-          <div class="field"><label for="r-from">From</label><input id="r-from" type="date" value="${ymd(first)}"></div>
-          <div class="field"><label for="r-to">Through</label><input id="r-to" type="date" value="${ymd(today)}"></div>
-        </div>
+        <h2>Activity for the date range</h2>
         <div class="btn-row">
-          <button class="btn" data-rpt="received">Received pallets</button>
-          <button class="btn" data-rpt="shipped">Shipped pallets</button>
-          <button class="btn secondary" data-rpt="txns">All transactions</button>
+          <button class="btn" data-view="activity">Item activity</button>
+          <button class="btn" data-view="txns">Transaction history</button>
+          <button class="btn secondary" data-view="daily">Daily in / out</button>
+        </div>
+        <div class="field" style="max-width:320px;margin-top:10px"><label for="rf-type">Transaction history shows</label>
+          <select id="rf-type">${Object.entries(TXN_GROUPS).map(([k, g]) => `<option value="${k}" ${loadPref('rptType', 'all') === k ? 'selected' : ''}>${esc(g.label)}</option>`).join('')}</select></div>
+        <div class="btn-row">
+          <button class="btn secondary" data-view="received">Received pallets</button>
+          <button class="btn secondary" data-view="shipped">Shipped pallets</button>
           <button class="btn secondary" data-view="audit">Adjustments &amp; voids</button>
         </div>
-        <div class="hint">Received and shipped list one row per pallet with the receipt / BOL number, for billing and customer questions. Adjustments &amp; voids lists every quantity change, hold and void with who did it and why.</div>
+        <div class="hint"><strong>Item activity</strong>: opening balance, received, shipped, adjusted and closing balance for each item. <strong>Transaction history</strong>: every receipt, shipment, move, adjustment and hold, newest last. <strong>Daily in / out</strong>: loads, pallets and units in and out each day.</div>
+      </div>
+
+      <div class="card">
+        <h2>Inventory right now</h2>
+        <div class="btn-row">
+          <button class="btn" data-view="aging">Aging</button>
+          <button class="btn secondary" data-view="onhand">On hand by item</button>
+          <button class="btn secondary" data-rpt="pallets">Download by pallet</button>
+        </div>
+        <div class="hint">Aging groups what's on hand by how long it has been here (0–30, 31–60, 61–90, 91–180, 181–365, over a year).</div>
+      </div>
+
+      <div class="card">
+        <h2>Inventory as of a date</h2>
+        <div class="grid2"><div class="field"><label for="asof">On hand at the end of</label><input id="asof" type="date" value="${ymd(addDays(first, -1))}"></div></div>
+        <div class="btn-row"><button class="btn" data-view="asof">Show inventory</button></div>
+        <div class="hint">Rebuilt from the pallet history, e.g. month-end inventory for a customer or an audit.</div>
       </div>
 
       <div class="card">
         <h2>Pallet history</h2>
         <div class="field"><label for="ph-q">Any pallet ID (shipped pallets included)</label><input id="ph-q" autocomplete="off"></div>
         <div class="btn-row"><button class="btn" id="ph-go" type="button">Find pallet</button></div>
-        <div class="hint">One pallet's full record: inbound load, every bay move, hold and adjustment, and the load(s) it shipped on. Nothing is ever deleted, so shipped pallets stay searchable.</div>
+        <div class="hint">One pallet's full record: inbound load, every bay move, hold and adjustment, and the load(s) it shipped on.</div>
       </div>
 
       <div class="card">
@@ -4792,16 +4824,6 @@
         <div class="btn-row"><button class="btn" data-view="trace">Trace ${esc(lbl.lotShort().toLowerCase())}</button></div>
         <div class="hint">Every pallet of the ${esc(lbl.lotShort().toLowerCase())}: when it came in, every shipment it went out on (ship-to and BOL #), and what's still here.</div>
       </div>
-
-      <div class="card">
-        <h2>Inventory as of a date</h2>
-        <div class="grid2">
-          <div class="field"><label for="asof">On hand at the end of</label><input id="asof" type="date" value="${ymd(addDays(first, -1))}"></div>
-          ${multiWh() ? `<div class="field"><label for="asof-wh">Warehouse</label><select id="asof-wh"><option value="">All warehouses</option>${activeWhs().map(w => `<option value="${w.id}">${esc(w.code)} — ${esc(w.name)}</option>`).join('')}</select></div>` : ''}
-        </div>
-        <div class="btn-row"><button class="btn" data-view="asof">Show inventory</button></div>
-        <div class="hint">Rebuilt from the pallet history, e.g. month-end inventory for a customer or an audit.</div>
-      </div>
       ${can('manager') ? `<div class="card">
         <h2>Full history export</h2>
         <p class="muted small" style="margin-top:0">One Excel workbook with everything: every pallet ever (any status), every transaction, receipts, shipments and their pallets, charges, items, accounts, locations and ship-tos. Save one each month to your own drive as an off-site copy of the records.</p>
@@ -4810,87 +4832,313 @@
       <div id="rpt-msg"></div>
       <div id="rpt-out"></div>`);
 
-    const range = () => {
-      const f = $('#r-from').value, t = $('#r-to').value;
-      if (!f || !t || f > t) throw new Error('Pick a valid date range.');
-      return { f, t, from: parseYmd(f).toISOString(), to: addDays(parseYmd(t), 1).toISOString() };
+    /* ---- filters ---- */
+    const saveF = () => savePref('rptFilter', F);
+    const readF = () => {
+      F.wh = $('#rf-wh')?.value || ''; F.acct = $('#rf-acct')?.value || ''; F.sku = $('#rf-sku').value.trim().toUpperCase();
+      F.from = $('#rf-from').value; F.to = $('#rf-to').value; F.detail = $('#rf-detail').value;
+      saveF();
     };
-    const done = (n, what) => { $('#rpt-msg').innerHTML = `<div class="notice ok">${n} row${n === 1 ? '' : 's'} exported: ${esc(what)}.</div>`; };
+    $$('#rpt-filters input, #rpt-filters select').forEach(el => el.addEventListener('change', () => {
+      readF();
+      if (el.id === 'rf-acct') $('#rf-skus').innerHTML = skuList().map(s => `<option value="${esc(s)}"></option>`).join('');
+    }));
+    $('#rf-type').onchange = e => savePref('rptType', e.target.value);
+    $$('[data-preset]').forEach(b => b.onclick = () => {
+      const t = new Date(), k = b.dataset.preset;
+      const [f, to] = k === 'month' ? [new Date(t.getFullYear(), t.getMonth(), 1), t]
+        : k === 'last' ? [new Date(t.getFullYear(), t.getMonth() - 1, 1), new Date(t.getFullYear(), t.getMonth(), 0)]
+        : k === '30' ? [addDays(t, -29), t] : [new Date(t.getFullYear(), 0, 1), t];
+      $('#rf-from').value = ymd(f); $('#rf-to').value = ymd(to); readF();
+      toast(`${b.textContent}: ${fmtDate(ymd(f))} to ${fmtDate(ymd(to))}.`);
+    });
+    const range = () => {
+      readF();
+      if (!F.from || !F.to || F.from > F.to) throw new Error('Pick a valid date range.');
+      return { f: F.from, t: F.to, from: parseYmd(F.from).toISOString(), to: addDays(parseYmd(F.to), 1).toISOString() };
+    };
+    // the item filter as item ids (a SKU can exist under more than one account)
+    const itemIds = () => {
+      readF();
+      if (!F.sku) return null;
+      const ids = S.items.filter(i => i.sku.toUpperCase() === F.sku && (!F.acct || i.owner_id === F.acct)).map(i => i.id);
+      if (!ids.length) throw new Error(`No item ${F.sku}${F.acct ? ' for ' + ownerById(F.acct).code : ''}.`);
+      return new Set(ids);
+    };
+    const whCode = () => F.wh ? whById(F.wh).code : '';
+    const acctCode = () => F.acct ? ownerById(F.acct).code : '';
+    const scopeText = () => [whCode() || (multiWh() ? 'All warehouses' : ''), acctCode() || (multiOwner() ? 'All accounts' : ''), F.sku].filter(Boolean).join(' · ');
+    const rangeText = g => `${fmtDate(g.f)} to ${fmtDate(g.t)}`;
+    const fileTag = g => [whCode(), acctCode(), F.sku, g ? `${g.f}-to-${g.t}` : localStamp()].filter(Boolean).join('-').replace(/[^\w-]+/g, '_');
+    const showWh = () => multiWh() && !F.wh, showAcct = () => multiOwner() && !F.acct, byLot = () => F.detail === 'lot';
+    // transactions filtered by the bar (server side where possible)
+    const txnQuery = (g, types) => () => {
+      let qb = sb.from('v_transactions').select('*').gte('created_at', g.from).lt('created_at', g.to);
+      if (types) qb = qb.in('txn_type', types);
+      if (F.acct) qb = qb.eq('owner_code', acctCode());
+      if (F.sku) qb = qb.eq('sku', F.sku);
+      if (F.wh) qb = qb.or(`from_warehouse.eq.${whCode()},to_warehouse.eq.${whCode()}`);
+      return qb.order('id');
+    };
+    const sumBy = (rows, f) => rows.reduce((a, r) => a + Number(f(r) || 0), 0);
+    const oneUom = rows => { const u = [...new Set(rows.map(r => r.uom).filter(Boolean))]; return u.length === 1 ? u[0] : null; };
 
+    const done = (n, what) => { $('#rpt-msg').innerHTML = `<div class="notice ok">${n} row${n === 1 ? '' : 's'} exported: ${esc(what)}.</div>`; };
     const reports = {
       pallets: async () => {
-        const rows = await fetchAll(() => sb.from('v_inventory').select('*').order('warehouse_code').order('owner_code').order('sku').order('lot_number').order('lp_id'));
-        done(downloadCsv(`inventory-by-pallet-${localStamp()}.csv`,
+        readF();
+        const ids = itemIds();
+        let rows = await fetchAll(() => {
+          let qb = sb.from('v_inventory').select('*');
+          if (F.wh) qb = qb.eq('warehouse_id', F.wh);
+          if (F.acct) qb = qb.eq('owner_id', F.acct);
+          return qb.order('warehouse_code').order('owner_code').order('sku').order('lot_number').order('lp_id');
+        });
+        if (ids) rows = rows.filter(r => ids.has(r.item_id));
+        done(downloadCsv(`inventory-by-pallet-${fileTag()}.csv`,
           ['Warehouse', 'Account', 'WMS Pallet ID', ...idHeaders(), 'SKU', 'Description', lbl.lotShort(), 'Production Date', 'Expiration Date',
-            'Qty On Hand', 'UOM', 'Allocated', 'Available', 'Location', 'Status', 'Received', 'Receipt #'],
+            'Qty On Hand', 'UOM', 'Allocated', 'Available', 'Location', 'Status', 'Received', 'Days Here', 'Receipt #'],
           rows.map(r => [r.warehouse_code, r.owner_code, r.lp_id, ...idValues(r), r.sku, r.description, r.lot_number, r.production_date, r.expiration_date,
-            r.qty_on_hand, r.uom, r.qty_allocated, r.qty_available, r.location, r.status, fmtDateTime(r.received_at), r.receipt_no])), 'inventory by pallet');
-      },
-      lots: async () => {
-        const rows = await fetchAll(() => sb.from('v_inventory_by_lot').select('*').order('warehouse_code').order('owner_code').order('sku').order('lot_number').order('item_id'));
-        done(downloadCsv(`inventory-by-lot-${localStamp()}.csv`,
-          ['Warehouse', 'Account', 'SKU', 'Description', lbl.lotShort(), 'Pallets', 'Qty On Hand', 'Allocated', 'Available', 'UOM', 'Oldest Received'],
-          rows.map(r => [r.warehouse_code, r.owner_code, r.sku, r.description, r.lot_number, r.pallets, r.qty_on_hand, r.qty_allocated, r.qty_available, r.uom, fmtDate(r.oldest_received)])),
-          'inventory by item and ' + lbl.lotShort().toLowerCase());
-      },
-      received: async () => {
-        const g = range();
-        const rcpts = await fetchAll(() => sb.from('receipts').select('id, receipt_no, received_at, vendor_name, carrier, trailer_no, po_number, inbound_bol, status, warehouse_id, owner_id')
-          .neq('status', 'void').eq('is_opening', false).gte('received_at', g.from).lt('received_at', g.to).order('id'));
-        const byId = Object.fromEntries(rcpts.map(r => [r.id, r]));
-        const pallets = await fetchIn(rcpts.map(r => r.id), chunk => () => sb.from('pallets')
-          .select(`lp_id, customer_pallet_id, ${REF_COLS}, item_id, lot_number, qty_received, status, receipt_id`)
-          .in('receipt_id', chunk).neq('status', 'void').order('lp_id'));
-        done(downloadCsv(`received-${g.f}-to-${g.t}.csv`,
-          ['Warehouse', 'Account', 'Received', 'Receipt #', 'Vendor', 'Carrier', 'Trailer #', 'PO #', 'Inbound BOL', 'WMS Pallet ID', ...idHeaders(),
-            'SKU', 'Description', lbl.lotShort(), 'Qty Received', 'UOM'],
-          pallets.map(p => { const r = byId[p.receipt_id], it = itemById(p.item_id);
-            return [whById(r.warehouse_id).code, ownerById(r.owner_id).code, fmtDateTime(r.received_at), r.receipt_no, r.vendor_name, r.carrier, r.trailer_no, r.po_number, r.inbound_bol,
-              p.lp_id, ...idValues(p), it.sku, it.description, p.lot_number, p.qty_received, it.uom]; })), 'received pallets');
-      },
-      shipped: async () => {
-        const g = range();
-        const ships = await fetchAll(() => sb.from('shipments').select('id, shipment_no, shipped_at, ship_to_name, ship_to_city, ship_to_state, carrier, pro_number, customer_order_no, po_number, warehouse_id, owner_id')
-          .eq('status', 'shipped').gte('shipped_at', g.from).lt('shipped_at', g.to).order('id'));
-        const byId = Object.fromEntries(ships.map(s => [s.id, s]));
-        const lines = await fetchIn(ships.map(s => s.id), chunk => () => sb.from('v_shipment_detail').select('*').in('shipment_id', chunk).order('shipment_id').order('lp_id'));
-        done(downloadCsv(`shipped-${g.f}-to-${g.t}.csv`,
-          ['Warehouse', 'Account', 'Shipped', 'BOL #', 'Ship To', 'City', 'State', 'Carrier', 'PRO #', 'Order #', 'PO #', 'WMS Pallet ID', ...idHeaders(),
-            'SKU', 'Description', lbl.lotShort(), 'Qty Shipped', 'UOM', 'Weight (lbs)'],
-          lines.map(l => { const s = byId[l.shipment_id];
-            return [whById(s.warehouse_id).code, ownerById(s.owner_id).code, fmtDateTime(s.shipped_at), s.shipment_no, s.ship_to_name, s.ship_to_city, s.ship_to_state, s.carrier, s.pro_number,
-              s.customer_order_no, s.po_number, l.lp_id, ...idValues(l), l.sku, l.description, l.lot_number, l.qty, l.uom, l.product_weight_lbs]; })),
-          'shipped pallets');
-      },
-      txns: async () => {
-        const g = range();
-        const rows = await fetchAll(() => sb.from('v_transactions').select('*').gte('created_at', g.from).lt('created_at', g.to).order('id'));
-        done(downloadCsv(`transactions-${g.f}-to-${g.t}.csv`,
-          ['When', 'Action', 'Account', 'WMS Pallet ID', lbl.cust(), 'SKU', lbl.lotShort(), 'Qty Change', 'Qty After',
-            'From Warehouse', 'From', 'To Warehouse', 'To', 'Receipt #', 'BOL #', 'Reason', 'User'],
-          rows.map(r => [fmtDateTime(r.created_at), r.txn_type, r.owner_code, r.lp_id, r.customer_pallet_id, r.sku, r.lot_number, r.qty_change, r.qty_after,
-            r.from_warehouse, r.from_location, r.to_warehouse, r.to_location, r.receipt_no, r.shipment_no, r.reason, r.user_name])), 'transactions');
+            r.qty_on_hand, r.uom, r.qty_allocated, r.qty_available, r.location, r.status, fmtDateTime(r.received_at), daysSince(r.received_at), r.receipt_no])), 'inventory by pallet');
       }
     };
     $$('[data-rpt]').forEach(b => b.onclick = () => busy(b, reports[b.dataset.rpt]));
 
-    // on-screen reports: a table with Export and Print
-    const show = (title, sub, cols, rows, file) => {
+    // on-screen reports: a table with Export and Print; an optional totals row
+    const show = (title, sub, cols, rows, file, foot) => {
       const out = $('#rpt-out');
+      $('#rpt-msg').innerHTML = '';
+      const all = foot ? rows.concat([foot]) : rows;
+      const cell = (v, i) => `<td class="${cols[i].num ? 'num' : ''}">${cols[i].label === 'WMS Pallet ID' && v ? `<a href="#/history/${encodeURIComponent(v)}" title="Full pallet history">${esc(v)}</a>` : esc(v ?? '')}</td>`;
       out.innerHTML = `
         <div class="card" id="rpt-view">
           <div class="row spread"><div><h2 style="margin:0">${esc(title)}</h2><div class="muted small">${esc(sub)}</div></div>
-            <div class="row"><button class="btn secondary sm" id="rv-csv" type="button">Export CSV</button><button class="btn secondary sm" id="rv-print" type="button">Print</button></div></div>
+            <div class="row"><button class="btn secondary sm" id="rv-csv" type="button">Export Excel</button><button class="btn secondary sm" id="rv-print" type="button">Print</button></div></div>
           ${rows.length ? `<div class="table-wrap" style="margin-top:10px"><table class="data">
             <thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
-            <tbody>${rows.slice(0, 1000).map(r => `<tr>${r.map((v, i) => `<td class="${cols[i].num ? 'num' : ''}">${cols[i].label === 'WMS Pallet ID' && v ? `<a href="#/history/${encodeURIComponent(v)}" title="Full pallet history">${esc(v)}</a>` : esc(v ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>
-          </table></div>${rows.length > 1000 ? '<p class="muted small">Showing the first 1,000 rows. Export to see them all.</p>' : ''}` : '<p class="muted" style="margin-top:10px">Nothing found.</p>'}
+            <tbody>${rows.slice(0, 1000).map(r => `<tr>${r.map(cell).join('')}</tr>`).join('')}</tbody>
+            ${foot ? `<tfoot><tr class="total">${foot.map(cell).join('')}</tr></tfoot>` : ''}
+          </table></div>${rows.length > 1000 ? '<p class="muted small">Showing the first 1,000 rows. Export to see them all.</p>' : ''}` : '<p class="muted" style="margin-top:10px">Nothing found for these filters.</p>'}
         </div>`;
-      $('#rv-csv').onclick = () => { const n = downloadCsv(file, cols.map(c => c.label), rows); toast(`Exported ${n} row${n === 1 ? '' : 's'}.`); };
-      $('#rv-print').onclick = () => WmsPrint.table(title, sub, cols, rows.map(r => r.map(v => String(v ?? ''))), S.settings);
+      $('#rv-csv').onclick = () => { const n = downloadCsv(file, cols.map(c => c.label), all); toast(`Exported ${n} row${n === 1 ? '' : 's'}.`); };
+      $('#rv-print').onclick = () => WmsPrint.table(title, sub, cols, all.map(r => r.map(v => String(v ?? ''))), S.settings);
       out.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
+    const Q = n => Number(n) ? fmtQty(n) : '';            // blank instead of 0 keeps wide tables readable
+    const P = n => Number(n) ? String(n) : '';
+
     const views = {
+      /* ---- item activity: opening + in - out +/- adjustments = closing ---- */
+      activity: async () => {
+        const g = range(), ids = itemIds();
+        let rows = await fetchAll(() => sb.rpc('wms_item_activity', { p_from: g.f, p_to: g.t, p_warehouse_id: F.wh || null, p_owner_id: F.acct || null }));
+        if (ids) { const skus = new Set([...ids].map(id => itemById(id).sku)); rows = rows.filter(r => skus.has(r.sku)); }
+        if (!byLot()) {
+          const m = new Map();
+          for (const r of rows) {
+            const k = [r.warehouse_code, r.owner_code, r.sku].join('|');
+            const a = m.get(k);
+            if (!a) { m.set(k, { ...r, lot_number: null }); continue; }
+            for (const f of ['open_pallets', 'open_qty', 'recv_pallets', 'recv_qty', 'import_qty', 'ship_pallets', 'ship_qty', 'adjust_qty', 'xfer_in_qty', 'xfer_out_qty', 'close_pallets', 'close_qty'])
+              a[f] = Number(a[f]) + Number(r[f]);
+          }
+          rows = [...m.values()];
+        }
+        const hasImp = rows.some(r => Number(r.import_qty)), hasX = rows.some(r => Number(r.xfer_in_qty) || Number(r.xfer_out_qty));
+        const cols = [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'SKU' }, { label: 'Description' },
+          ...(byLot() ? [{ label: lbl.lotShort() }] : []), { label: 'UOM' },
+          { label: 'Open Plt', num: true }, { label: 'Opening', num: true }, { label: 'Recv Plt', num: true }, { label: 'Received', num: true },
+          ...(hasImp ? [{ label: 'Imported', num: true }] : []), { label: 'Ship Plt', num: true }, { label: 'Shipped', num: true }, { label: 'Adjusted', num: true },
+          ...(hasX ? [{ label: 'Transfer In', num: true }, { label: 'Transfer Out', num: true }] : []), { label: 'Close Plt', num: true }, { label: 'Closing', num: true }];
+        const line = r => [...(showWh() ? [r.warehouse_code] : []), ...(showAcct() ? [r.owner_code] : []), r.sku, r.description,
+          ...(byLot() ? [r.lot_number || ''] : []), r.uom || '',
+          String(r.open_pallets || 0), fmtQty(r.open_qty), P(r.recv_pallets), Q(r.recv_qty), ...(hasImp ? [Q(r.import_qty)] : []),
+          P(r.ship_pallets), Q(r.ship_qty), Q(r.adjust_qty), ...(hasX ? [Q(r.xfer_in_qty), Q(r.xfer_out_qty)] : []),
+          String(r.close_pallets || 0), fmtQty(r.close_qty)];
+        const u = oneUom(rows);
+        const lead = cols.findIndex(c => c.label === 'UOM');
+        const foot = rows.length > 1 ? [...Array(lead).fill(''), u || '', String(sumBy(rows, r => r.open_pallets)), u ? fmtQty(sumBy(rows, r => r.open_qty)) : '',
+          P(sumBy(rows, r => r.recv_pallets)), u ? Q(sumBy(rows, r => r.recv_qty)) : '', ...(hasImp ? [u ? Q(sumBy(rows, r => r.import_qty)) : ''] : []),
+          P(sumBy(rows, r => r.ship_pallets)), u ? Q(sumBy(rows, r => r.ship_qty)) : '', u ? Q(sumBy(rows, r => r.adjust_qty)) : '',
+          ...(hasX ? [u ? Q(sumBy(rows, r => r.xfer_in_qty)) : '', u ? Q(sumBy(rows, r => r.xfer_out_qty)) : ''] : []),
+          String(sumBy(rows, r => r.close_pallets)), u ? fmtQty(sumBy(rows, r => r.close_qty)) : ''] : null;
+        if (foot) foot[0] = 'TOTAL';
+        show(`Item activity, ${rangeText(g)}`,
+          `${scopeText()}${scopeText() ? ' · ' : ''}${sumBy(rows, r => r.open_pallets)} pallets at start → ${sumBy(rows, r => r.close_pallets)} at end · in ${sumBy(rows, r => r.recv_pallets)}, out ${sumBy(rows, r => r.ship_pallets)}`,
+          cols, rows.map(line), `item-activity-${fileTag(g)}.csv`, foot);
+      },
+
+      /* ---- transaction history ---- */
+      txns: async () => {
+        const g = range(), grp = TXN_GROUPS[$('#rf-type').value] || TXN_GROUPS.all;
+        const rows = await fetchAll(txnQuery(g, grp.types));
+        const cols = [{ label: 'When' }, { label: 'Action' }, ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'WMS Pallet ID' }, { label: lbl.cust() },
+          { label: 'SKU' }, { label: lbl.lotShort() }, { label: 'Qty change', num: true }, { label: 'Qty after', num: true },
+          { label: 'From' }, { label: 'To' }, { label: 'Receipt / BOL #' }, { label: 'Reason' }, { label: 'By' }];
+        const loc = (w, l) => l ? (multiWh() && w ? `${w} ${l}` : l) : '';
+        show(`${grp.label}, ${rangeText(g)}`, `${scopeText()}${scopeText() ? ' · ' : ''}${rows.length} transaction${rows.length === 1 ? '' : 's'}`, cols,
+          rows.map(r => [fmtDateTime(r.created_at), txnName(r), ...(showAcct() ? [r.owner_code] : []), r.lp_id, r.customer_pallet_id, r.sku, r.lot_number,
+            Number(r.qty_change) ? fmtQty(r.qty_change) : '', fmtQty(r.qty_after), loc(r.from_warehouse, r.from_location), loc(r.to_warehouse, r.to_location),
+            r.receipt_no || r.shipment_no || '', r.reason, r.user_name]),
+          `transactions-${fileTag(g)}.csv`);
+      },
+
+      /* ---- daily in / out ---- */
+      daily: async () => {
+        const g = range();
+        const rows = await fetchAll(txnQuery(g, ['RECEIVE', 'VOID_RECEIVE', 'SHIP', 'VOID_SHIP']));
+        const days = new Map();
+        const day = k => days.get(k) || days.set(k, { inL: new Set(), inP: 0, inQ: 0, outL: new Set(), outP: 0, outQ: 0, uoms: new Set() }).get(k);
+        for (const r of rows) {
+          if (r.opening) continue;
+          const d = day(ymd(new Date(r.created_at))), q = Number(r.qty_change);
+          d.uoms.add(itemsBySku(r.sku));
+          if (r.txn_type === 'RECEIVE') { d.inL.add(r.receipt_no); d.inP++; d.inQ += q; }
+          else if (r.txn_type === 'VOID_RECEIVE') { d.inP--; d.inQ += q; }
+          else if (r.txn_type === 'SHIP') { d.outL.add(r.shipment_no); d.outP++; d.outQ -= q; }
+          else { d.outP--; d.outQ -= q; }
+        }
+        const list = [...days.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1);
+        const u = new Set(list.flatMap(([, d]) => [...d.uoms])); const unit = u.size === 1 ? [...u][0] : '';
+        const wk = k => parseYmd(k).toLocaleDateString(undefined, { weekday: 'short' });
+        const tot = list.reduce((a, [, d]) => ({ inL: a.inL + d.inL.size, inP: a.inP + d.inP, inQ: a.inQ + d.inQ, outL: a.outL + d.outL.size, outP: a.outP + d.outP, outQ: a.outQ + d.outQ }),
+          { inL: 0, inP: 0, inQ: 0, outL: 0, outP: 0, outQ: 0 });
+        show(`Daily in / out, ${rangeText(g)}`,
+          `${scopeText()}${scopeText() ? ' · ' : ''}${tot.inL} inbound load${tot.inL === 1 ? '' : 's'}, ${tot.inP} pallets in · ${tot.outL} outbound load${tot.outL === 1 ? '' : 's'}, ${tot.outP} pallets out`,
+          [{ label: 'Date' }, { label: 'Day' }, { label: 'Loads In', num: true }, { label: 'Pallets In', num: true }, { label: `Qty In${unit ? ' (' + unit + ')' : ''}`, num: true },
+           { label: 'Loads Out', num: true }, { label: 'Pallets Out', num: true }, { label: `Qty Out${unit ? ' (' + unit + ')' : ''}`, num: true }],
+          list.map(([k, d]) => [fmtDate(k), wk(k), P(d.inL.size), P(d.inP), Q(d.inQ), P(d.outL.size), P(d.outP), Q(d.outQ)]),
+          `daily-in-out-${fileTag(g)}.csv`,
+          list.length > 1 ? ['TOTAL', '', String(tot.inL), String(tot.inP), unit ? fmtQty(tot.inQ) : '', String(tot.outL), String(tot.outP), unit ? fmtQty(tot.outQ) : ''] : null);
+      },
+
+      /* ---- received / shipped pallets (one row per pallet) ---- */
+      received: async () => {
+        const g = range(), ids = itemIds();
+        const rcpts = await fetchAll(() => {
+          let qb = sb.from('receipts').select('id, receipt_no, received_at, vendor_name, carrier, trailer_no, po_number, inbound_bol, status, warehouse_id, owner_id')
+            .neq('status', 'void').eq('is_opening', false).gte('received_at', g.from).lt('received_at', g.to);
+          if (F.wh) qb = qb.eq('warehouse_id', F.wh);
+          if (F.acct) qb = qb.eq('owner_id', F.acct);
+          return qb.order('id');
+        });
+        const byId = Object.fromEntries(rcpts.map(r => [r.id, r]));
+        let pallets = await fetchIn(rcpts.map(r => r.id), chunk => () => sb.from('pallets')
+          .select(`lp_id, customer_pallet_id, ${REF_COLS}, item_id, lot_number, qty_received, status, receipt_id`)
+          .in('receipt_id', chunk).neq('status', 'void').order('lp_id'));
+        if (ids) pallets = pallets.filter(p => ids.has(p.item_id));
+        pallets.sort((a, b) => byId[a.receipt_id].received_at < byId[b.receipt_id].received_at ? -1 : byId[a.receipt_id].received_at > byId[b.receipt_id].received_at ? 1 : a.lp_id < b.lp_id ? -1 : 1);
+        const loads = new Set(pallets.map(p => p.receipt_id)).size;
+        const u = oneUom(pallets.map(p => ({ uom: itemById(p.item_id).uom })));
+        show(`Received pallets, ${rangeText(g)}`, `${scopeText()}${scopeText() ? ' · ' : ''}${loads} load${loads === 1 ? '' : 's'} · ${pallets.length} pallet${pallets.length === 1 ? '' : 's'}${u ? ' · ' + fmtQty(sumBy(pallets, p => p.qty_received)) + ' ' + u : ''}`,
+          [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'Received' }, { label: 'Receipt #' }, { label: 'Vendor' },
+           { label: 'Carrier' }, { label: 'Trailer #' }, { label: 'PO #' }, { label: 'Inbound BOL' }, { label: 'WMS Pallet ID' }, ...idHeaders().map(h => ({ label: h })),
+           { label: 'SKU' }, { label: 'Description' }, { label: lbl.lotShort() }, { label: 'Qty', num: true }, { label: 'UOM' }],
+          pallets.map(p => { const r = byId[p.receipt_id], it = itemById(p.item_id);
+            return [...(showWh() ? [whById(r.warehouse_id).code] : []), ...(showAcct() ? [ownerById(r.owner_id).code] : []), fmtDateTime(r.received_at), r.receipt_no, r.vendor_name,
+              r.carrier, r.trailer_no, r.po_number, r.inbound_bol, p.lp_id, ...idValues(p), it.sku, it.description, p.lot_number, fmtQty(p.qty_received), it.uom]; }),
+          `received-${fileTag(g)}.csv`);
+      },
+      shipped: async () => {
+        const g = range(), ids = itemIds();
+        const ships = await fetchAll(() => {
+          let qb = sb.from('shipments').select('id, shipment_no, shipped_at, ship_to_name, ship_to_city, ship_to_state, carrier, pro_number, customer_order_no, po_number, warehouse_id, owner_id')
+            .eq('status', 'shipped').gte('shipped_at', g.from).lt('shipped_at', g.to);
+          if (F.wh) qb = qb.eq('warehouse_id', F.wh);
+          if (F.acct) qb = qb.eq('owner_id', F.acct);
+          return qb.order('id');
+        });
+        const byId = Object.fromEntries(ships.map(s => [s.id, s]));
+        let lines = await fetchIn(ships.map(s => s.id), chunk => () => sb.from('v_shipment_detail').select('*').in('shipment_id', chunk).order('shipment_id').order('lp_id'));
+        if (ids) lines = lines.filter(l => ids.has(l.item_id) || [...ids].some(id => itemById(id).sku === l.sku));
+        lines.sort((a, b) => byId[a.shipment_id].shipped_at < byId[b.shipment_id].shipped_at ? -1 : byId[a.shipment_id].shipped_at > byId[b.shipment_id].shipped_at ? 1 : 0);
+        const loads = new Set(lines.map(l => l.shipment_id)).size, u = oneUom(lines);
+        show(`Shipped pallets, ${rangeText(g)}`, `${scopeText()}${scopeText() ? ' · ' : ''}${loads} load${loads === 1 ? '' : 's'} · ${lines.length} pallet${lines.length === 1 ? '' : 's'}${u ? ' · ' + fmtQty(sumBy(lines, l => l.qty)) + ' ' + u : ''}`,
+          [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'Shipped' }, { label: 'BOL #' }, { label: 'Ship To' }, { label: 'City' },
+           { label: 'State' }, { label: 'Carrier' }, { label: 'PRO #' }, { label: 'Order #' }, { label: 'PO #' }, { label: 'WMS Pallet ID' }, ...idHeaders().map(h => ({ label: h })),
+           { label: 'SKU' }, { label: 'Description' }, { label: lbl.lotShort() }, { label: 'Qty', num: true }, { label: 'UOM' }, { label: 'Weight (lbs)', num: true }],
+          lines.map(l => { const s = byId[l.shipment_id];
+            return [...(showWh() ? [whById(s.warehouse_id).code] : []), ...(showAcct() ? [ownerById(s.owner_id).code] : []), fmtDateTime(s.shipped_at), s.shipment_no, s.ship_to_name,
+              s.ship_to_city, s.ship_to_state, s.carrier, s.pro_number, s.customer_order_no, s.po_number, l.lp_id, ...idValues(l), l.sku, l.description, l.lot_number,
+              fmtQty(l.qty), l.uom, l.product_weight_lbs ? fmtQty(l.product_weight_lbs) : '']; }),
+          `shipped-${fileTag(g)}.csv`);
+      },
+      audit: async () => {
+        const g = range();
+        const rows = await fetchAll(txnQuery(g, ['ADJUST', 'HOLD', 'RELEASE', 'VOID_RECEIVE', 'VOID_SHIP']));
+        show(`Adjustments & voids, ${rangeText(g)}`, `${scopeText()}${scopeText() ? ' · ' : ''}${rows.length} change${rows.length === 1 ? '' : 's'}`,
+          [{ label: 'When' }, { label: 'What' }, ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'WMS Pallet ID' }, { label: 'SKU' }, { label: lbl.lotShort() },
+           { label: 'Qty change', num: true }, { label: 'Qty after', num: true }, { label: 'Ref' }, { label: 'Reason' }, { label: 'By' }],
+          rows.map(r => [fmtDateTime(r.created_at), txnName(r), ...(showAcct() ? [r.owner_code] : []), r.lp_id, r.sku, r.lot_number,
+            Number(r.qty_change) ? fmtQty(r.qty_change) : '', fmtQty(r.qty_after), r.receipt_no || r.shipment_no || '', r.reason, r.user_name]),
+          `adjustments-voids-${fileTag(g)}.csv`);
+      },
+
+      /* ---- inventory right now ---- */
+      aging: async () => {
+        readF();
+        const ids = itemIds();
+        let rows = await fetchAll(() => {
+          let qb = sb.from('v_inventory').select('*');
+          if (F.wh) qb = qb.eq('warehouse_id', F.wh);
+          if (F.acct) qb = qb.eq('owner_id', F.acct);
+          return qb.order('pallet_id');
+        });
+        if (ids) rows = rows.filter(r => ids.has(r.item_id));
+        const B = [[30, '0–30'], [60, '31–60'], [90, '61–90'], [180, '91–180'], [365, '181–365'], [Infinity, '365+']];
+        const m = new Map();
+        for (const r of rows) {
+          const k = [r.warehouse_code, r.owner_code, r.sku, byLot() ? r.lot_number || '' : ''].join('|');
+          const a = m.get(k) || m.set(k, { r, b: B.map(() => 0), plt: 0, qty: 0, days: 0, oldest: r.received_at }).get(k);
+          const d = daysSince(r.received_at);
+          a.b[B.findIndex(([max]) => d <= max)]++;
+          a.plt++; a.qty += Number(r.qty_on_hand); a.days += d;
+          if (r.received_at < a.oldest) a.oldest = r.received_at;
+        }
+        const list = [...m.values()].sort((x, y) => x.oldest < y.oldest ? -1 : 1);
+        const u = oneUom(rows), tb = B.map((_, i) => sumBy(list, a => a.b[i]));
+        const avg = rows.length ? Math.round(sumBy(rows, r => daysSince(r.received_at)) / rows.length) : 0;
+        const lead = (showWh() ? 1 : 0) + (showAcct() ? 1 : 0) + 2 + (byLot() ? 1 : 0);
+        show(`Inventory aging, as of ${fmtDate(ymd(new Date()))}`,
+          `${scopeText()}${scopeText() ? ' · ' : ''}${rows.length} pallets · average ${avg} days here · ${tb[3] + tb[4] + tb[5]} pallets over 90 days`,
+          [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'SKU' }, { label: 'Description' },
+           ...(byLot() ? [{ label: lbl.lotShort() }] : []), ...B.map(([, l]) => ({ label: l + ' days', num: true })),
+           { label: 'Pallets', num: true }, { label: 'Qty', num: true }, { label: 'UOM' }, { label: 'Oldest', num: false }, { label: 'Avg Days', num: true }],
+          list.map(a => [...(showWh() ? [a.r.warehouse_code] : []), ...(showAcct() ? [a.r.owner_code] : []), a.r.sku, a.r.description,
+            ...(byLot() ? [a.r.lot_number || ''] : []), ...a.b.map(P), String(a.plt), fmtQty(a.qty), a.r.uom, fmtDate(a.oldest), String(Math.round(a.days / a.plt))]),
+          `aging-${fileTag()}.csv`,
+          list.length > 1 ? ['TOTAL', ...Array(lead - 1).fill(''), ...tb.map(String), String(rows.length), u ? fmtQty(sumBy(rows, r => r.qty_on_hand)) : '', u || '', '', String(avg)] : null);
+      },
+      onhand: async () => {
+        readF();
+        const ids = itemIds();
+        let rows = await fetchAll(() => {
+          let qb = sb.from('v_inventory').select('*');
+          if (F.wh) qb = qb.eq('warehouse_id', F.wh);
+          if (F.acct) qb = qb.eq('owner_id', F.acct);
+          return qb.order('pallet_id');
+        });
+        if (ids) rows = rows.filter(r => ids.has(r.item_id));
+        const m = new Map();
+        for (const r of rows) {
+          const k = [r.warehouse_code, r.owner_code, r.sku, byLot() ? r.lot_number || '' : ''].join('|');
+          const a = m.get(k) || m.set(k, { r, plt: 0, qty: 0, alloc: 0, hold: 0, locs: new Set() }).get(k);
+          a.plt++; a.qty += Number(r.qty_on_hand); a.alloc += Number(r.qty_allocated || 0); if (r.status === 'hold') a.hold++; if (r.location) a.locs.add(r.location);
+        }
+        const list = [...m.values()].sort((x, y) => (x.r.sku + (x.r.lot_number || '')).localeCompare(y.r.sku + (y.r.lot_number || '')));
+        const u = oneUom(rows), lead = (showWh() ? 1 : 0) + (showAcct() ? 1 : 0) + 2 + (byLot() ? 1 : 0);
+        show(`On hand by item, ${fmtDate(ymd(new Date()))}`, `${scopeText()}${scopeText() ? ' · ' : ''}${list.length} line${list.length === 1 ? '' : 's'} · ${rows.length} pallets${u ? ' · ' + fmtQty(sumBy(rows, r => r.qty_on_hand)) + ' ' + u : ''}`,
+          [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'SKU' }, { label: 'Description' },
+           ...(byLot() ? [{ label: lbl.lotShort() }] : []), { label: 'Pallets', num: true }, { label: 'On Hand', num: true }, { label: 'Allocated', num: true },
+           { label: 'Available', num: true }, { label: 'UOM' }, { label: 'On Hold', num: true }, { label: 'Locations' }],
+          list.map(a => [...(showWh() ? [a.r.warehouse_code] : []), ...(showAcct() ? [a.r.owner_code] : []), a.r.sku, a.r.description, ...(byLot() ? [a.r.lot_number || ''] : []),
+            String(a.plt), fmtQty(a.qty), Q(a.alloc), fmtQty(a.qty - a.alloc), a.r.uom, P(a.hold), [...a.locs].sort().join(', ')]),
+          `on-hand-${fileTag()}.csv`,
+          list.length > 1 ? ['TOTAL', ...Array(lead - 1).fill(''), String(rows.length), u ? fmtQty(sumBy(rows, r => r.qty_on_hand)) : '', u ? Q(sumBy(rows, r => r.qty_allocated)) : '',
+            u ? fmtQty(sumBy(rows, r => r.qty_on_hand) - sumBy(rows, r => r.qty_allocated)) : '', u || '', P(sumBy(list, a => a.hold)), ''] : null);
+      },
+
+      /* ---- lot trace (its own SKU box), inventory as of a date ---- */
       trace: async () => {
         const lot = $('#lt-lot').value.trim(), sku = $('#lt-sku').value.trim();
         if (!lot) throw new Error(`Enter the ${lbl.lotShort().toLowerCase()} to trace.`);
@@ -4910,30 +5158,21 @@
           `lot-trace-${lot.replace(/[^\w-]+/g, '_')}.csv`);
       },
       asof: async () => {
+        readF();
         const d = $('#asof').value;
         if (!d) throw new Error('Pick a date.');
-        const wh = $('#asof-wh')?.value || null;
-        const rows = await fetchAll(() => sb.rpc('wms_inventory_as_of', { p_date: d, p_warehouse_id: wh }));
-        const uoms = [...new Set(rows.map(r => r.uom))];
+        const ids = itemIds();
+        let rows = await fetchAll(() => sb.rpc('wms_inventory_as_of', { p_date: d, p_warehouse_id: F.wh || null }));
+        if (F.acct) rows = rows.filter(r => r.owner_code === acctCode());
+        if (ids) { const skus = new Set([...ids].map(id => itemById(id).sku)); rows = rows.filter(r => skus.has(r.sku)); }
+        const u = oneUom(rows);
         show(`Inventory on hand at end of ${fmtDate(d)}`,
-          `${rows.length} pallet${rows.length === 1 ? '' : 's'}${uoms.length === 1 ? ' · ' + fmtQty(rows.reduce((a, r) => a + Number(r.qty), 0)) + ' ' + uoms[0] : ''}${wh ? ' · ' + whById(wh).code : ''}`,
-          [...(multiWh() ? [{ label: 'Whse' }] : []), ...(multiOwner() ? [{ label: 'Account' }] : []), { label: 'Location' }, { label: 'WMS Pallet ID' }, ...idHeaders().map(h => ({ label: h })),
+          `${scopeText()}${scopeText() ? ' · ' : ''}${rows.length} pallet${rows.length === 1 ? '' : 's'}${u ? ' · ' + fmtQty(sumBy(rows, r => r.qty)) + ' ' + u : ''}`,
+          [...(showWh() ? [{ label: 'Whse' }] : []), ...(showAcct() ? [{ label: 'Account' }] : []), { label: 'Location' }, { label: 'WMS Pallet ID' }, ...idHeaders().map(h => ({ label: h })),
            { label: 'SKU' }, { label: 'Description' }, { label: lbl.lotShort() }, { label: 'Qty', num: true }, { label: 'UOM' }, { label: 'Received' }, { label: 'Receipt #' }],
-          rows.map(r => [...(multiWh() ? [r.warehouse_code] : []), ...(multiOwner() ? [r.owner_code] : []), r.location, r.lp_id, ...idValues(r),
+          rows.map(r => [...(showWh() ? [r.warehouse_code] : []), ...(showAcct() ? [r.owner_code] : []), r.location, r.lp_id, ...idValues(r),
             r.sku, r.description, r.lot_number, fmtQty(r.qty), r.uom, fmtDate(r.received_at), r.receipt_no]),
-          `inventory-as-of-${d}.csv`);
-      },
-      audit: async () => {
-        const g = range();
-        const rows = await fetchAll(() => sb.from('v_transactions').select('*')
-          .in('txn_type', ['ADJUST', 'HOLD', 'RELEASE', 'VOID_RECEIVE', 'VOID_SHIP']).gte('created_at', g.from).lt('created_at', g.to).order('id'));
-        const what = { ADJUST: 'Qty adjusted', HOLD: 'Put on hold', RELEASE: 'Released from hold', VOID_RECEIVE: 'Pallet voided', VOID_SHIP: 'Shipment voided (returned to stock)' };
-        show(`Adjustments & voids, ${fmtDate(g.f)} to ${fmtDate(g.t)}`, `${rows.length} change${rows.length === 1 ? '' : 's'}`,
-          [{ label: 'When' }, { label: 'What' }, ...(multiOwner() ? [{ label: 'Account' }] : []), { label: 'WMS Pallet ID' }, { label: 'SKU' }, { label: lbl.lotShort() },
-           { label: 'Qty change', num: true }, { label: 'Qty after', num: true }, { label: 'Ref' }, { label: 'Reason' }, { label: 'By' }],
-          rows.map(r => [fmtDateTime(r.created_at), what[r.txn_type] || r.txn_type, ...(multiOwner() ? [r.owner_code] : []), r.lp_id, r.sku, r.lot_number,
-            Number(r.qty_change) ? fmtQty(r.qty_change) : '', fmtQty(r.qty_after), r.receipt_no || r.shipment_no || '', r.reason, r.user_name]),
-          `adjustments-voids-${g.f}-to-${g.t}.csv`);
+          `inventory-as-of-${d}${F.wh || F.acct || F.sku ? '-' + fileTag() : ''}.csv`);
       }
     };
     $$('[data-view]').forEach(b => b.onclick = () => busy(b, views[b.dataset.view]));
@@ -4942,6 +5181,22 @@
     $('#ph-q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#ph-go').click(); } });
     $('#lt-lot').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); busy($('[data-view=trace]'), views.trace); } });
   }
+  // transaction types as people say them
+  const TXN_GROUPS = {
+    all:      { label: 'All transactions', types: null },
+    receipts: { label: 'Receipts', types: ['RECEIVE', 'VOID_RECEIVE'] },
+    ships:    { label: 'Shipments', types: ['SHIP', 'VOID_SHIP'] },
+    moves:    { label: 'Bay moves', types: ['MOVE'] },
+    adjust:   { label: 'Adjustments & voids', types: ['ADJUST', 'VOID_RECEIVE', 'VOID_SHIP'] },
+    holds:    { label: 'Holds & releases', types: ['HOLD', 'RELEASE'] }
+  };
+  function txnName(r) {
+    if (r.txn_type === 'RECEIVE' && r.opening) return 'Opening balance';
+    return { RECEIVE: 'Received', SHIP: 'Shipped', MOVE: r.from_warehouse && r.to_warehouse && r.from_warehouse !== r.to_warehouse ? 'Transferred' : 'Moved',
+      ADJUST: 'Qty adjusted', HOLD: 'Put on hold', RELEASE: 'Released from hold', VOID_RECEIVE: 'Pallet voided', VOID_SHIP: 'Shipment voided (returned)' }[r.txn_type] || r.txn_type;
+  }
+  const daysSince = d => Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 864e5));
+  const itemsBySku = sku => (S.items.find(i => i.sku === sku) || {}).uom || '';
 
   /* ------------------------------------------------------------------ */
   /* setup: items, locations, customers & vendors, company              */
