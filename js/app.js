@@ -96,7 +96,8 @@
   /* warehouses & customer accounts */
   function whById(id) { return (S.warehouses || []).find(w => w.id === id) || {}; }
   function ownerById(id) { return (S.owners || []).find(o => o.id === id) || {}; }
-  const activeWhs = () => (S.warehouses || []).filter(w => w.active);
+  // a customer login only sees the warehouses where its accounts have stock or past loads
+  const activeWhs = () => (S.warehouses || []).filter(w => w.active && (!S.custWhIds || S.custWhIds.has(w.id)));
   const activeOwners = () => (S.owners || []).filter(o => o.active);
   const multiWh = () => activeWhs().length > 1;
   const multiOwner = () => activeOwners().length > 1;
@@ -384,19 +385,32 @@
     S.settings = settings; S.items = items; S.locations = locations; S.parties = parties;
     S.warehouses = warehouses; S.owners = owners; S.chargeTypes = chargeTypes;
     applyTheme();
+    // a customer only works in warehouses where it has stock, receipts or shipments
+    S.custWhIds = null;
+    let custStock = {};
+    if (isCustomer()) {
+      const [stock, rc, sh] = await Promise.all([
+        fetchAll(() => sb.from('v_inventory_by_lot').select('warehouse_id, pallets').order('warehouse_id')).catch(() => []),
+        fetchAll(() => sb.from('receipts').select('warehouse_id').neq('status', 'void').order('id')).catch(() => []),
+        fetchAll(() => sb.from('shipments').select('warehouse_id').neq('status', 'void').order('id')).catch(() => [])
+      ]);
+      stock.forEach(r => { custStock[r.warehouse_id] = (custStock[r.warehouse_id] || 0) + Number(r.pallets); });
+      const ids = new Set([...stock, ...rc, ...sh].map(r => r.warehouse_id));
+      if (ids.size) S.custWhIds = ids;
+    }
     // current warehouse: this device's last choice, else the user's home, else the first
-    const ok = id => warehouses.some(w => w.id === id && w.active);
+    const ok = id => activeWhs().some(w => w.id === id);
     const pref = loadPref('wh', null);
     S.whId = ok(S.whId) ? S.whId : ok(pref) ? pref : ok(S.profile?.home_warehouse_id) ? S.profile.home_warehouse_id
-      : (warehouses.find(w => w.active) || {}).id;
+      : (activeWhs()[0] || {}).id;
     S.users = await q(sb.from('app_users').select('id, full_name')).catch(() => []);
-    if (isCustomer() && !loadPref('custInit', false)) {
-      const rows = await fetchAll(() => sb.from('v_inventory_by_lot').select('warehouse_id, pallets').order('warehouse_id')).catch(() => []);
-      const per = {}; rows.forEach(r => { per[r.warehouse_id] = (per[r.warehouse_id] || 0) + Number(r.pallets); });
-      const top = Object.entries(per).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (isCustomer() && !loadPref('custInit2', false)) {
+      // first sign-in on this device: start in the warehouse holding the most of their pallets,
+      // with every screen showing just that warehouse (the warehouse picker switches it)
+      const top = Object.entries(custStock).sort((a, b) => b[1] - a[1])[0]?.[0];
       if (top && ok(top)) { S.whId = top; savePref('wh', top); }
-      savePref('dashAllWh', true); savePref('lookupAllWh', true); savePref('invFilter', { ...loadPref('invFilter', {}), allWh: true });
-      savePref('custInit', true);
+      savePref('dashAllWh', false); savePref('lookupAllWh', false); savePref('invFilter', { ...loadPref('invFilter', {}), allWh: false });
+      savePref('custInit2', true);
     }
     await loadWhStock();
     document.title = (cfg.BRAND_SHORT || '') + ' WMS';
