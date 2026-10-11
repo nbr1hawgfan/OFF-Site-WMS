@@ -3,6 +3,15 @@
 Mobile-first warehouse app operated under Logistics Warehouse, Inc. Static PWA (no build step) on
 GitHub Pages, backed by the **Offsite WMS** Supabase project.
 
+**v1.9.1 Racking location type** (migration 020): Setup > Locations has
+Type "Racking" with tiers (counting the floor) × pallets per tier, for any
+location name.
+- **Bulk:** tick bays in the list and use "Set Racking" / "Make Floor Bays",
+  or set by prefix.
+- **Import:** the Locations import takes type `rack` with tiers and per-tier
+  columns.
+- **Database rule:** a rack location must have its size.
+
 **v1.9.0 rack bays + glass buttons** (migration 019):
 - **Rack bays:** mark bays as racking with tiers (counting the floor) ×
   pallets per tier, either in bulk ("bays starting with R are racks: 4 tiers ×
@@ -264,7 +273,7 @@ sheet with row counts. Meant as a monthly off-site copy of the records.
 - **Setup:** items, locations, accounts, ship-to & vendors, warehouses,
   users, company info, pallet identifiers.
 
-> **Database:** migrations 001–019 and the `admin-users` Edge Function, all
+> **Database:** migrations 001–020 and the `admin-users` Edge Function, all
 > applied to Offsite WMS.
 
 ## Files

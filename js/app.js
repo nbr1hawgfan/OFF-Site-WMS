@@ -2093,7 +2093,10 @@
     const m = String(l.code).toUpperCase().match(/^[A-Z]+/);
     return m ? m[0] : '#';
   }
-  const isRack = l => !!(l.rack_tiers && l.rack_per_tier);
+  const LOC_TYPES = [['storage', 'Storage (floor bay)'], ['rack', 'Racking'], ['floor', 'Floor'], ['staging', 'Staging'], ['dock', 'Dock'], ['hold', 'Hold']];
+  const locTypeName = t => (LOC_TYPES.find(x => x[0] === t) || [t, t])[1];
+  const isRack = l => l.loc_type === 'rack' || !!(l.rack_tiers && l.rack_per_tier);
+  const isBay = l => l.loc_type === 'storage' || isRack(l);   // what the map and counts show by default
   const capOf = l => isRack(l) ? l.rack_tiers * l.rack_per_tier : l.capacity || whById(l.warehouse_id).default_capacity || null;
 
   async function viewBayMap() {
@@ -2106,7 +2109,7 @@
       .select('pallet_id, lp_id, item_id, sku, description, lot_number, qty_on_hand, uom, status, received_at, location_id, owner_id, owner_code, customer_pallet_id')
       .eq('warehouse_id', S.whId).order('pallet_id'));
     if (mySeq !== navSeq) return;
-    const locs = whLocations(S.whId).filter(l => pref.types === 'all' || l.loc_type === 'storage');
+    const locs = whLocations(S.whId).filter(l => pref.types === 'all' || isBay(l));
     const byLoc = {};
     for (const p of pallets) (byLoc[p.location_id] = byLoc[p.location_id] || []).push(p);
     const hasCap = locs.some(capOf);
@@ -2221,7 +2224,7 @@
   }
 
   function countForm() {
-    const locs = whLocations(S.whId).filter(l => l.loc_type === 'storage');
+    const locs = whLocations(S.whId).filter(isBay);
     const groups = {};
     locs.forEach(l => (groups[bayGroup(l)] = groups[bayGroup(l)] || []).push(l));
     const keys = Object.keys(groups).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -4756,25 +4759,43 @@
             <input id="l-code" required maxlength="30" placeholder="A-01-1" autocapitalize="characters"></div>
           <div class="field"><label for="l-zone">Zone (optional)</label><input id="l-zone" maxlength="30"></div>
           <div class="field"><label for="l-type">Type</label>
-            <select id="l-type">${['storage', 'floor', 'staging', 'dock', 'hold'].map(t => `<option>${t}</option>`).join('')}</select></div>
+            <select id="l-type">${LOC_TYPES.filter(([t]) => t !== 'rack' || 'rack_tiers' in (locs[0] || {})).map(([t, n]) => `<option value="${t}">${n}</option>`).join('')}</select></div>
+          <div class="field" id="l-rack" hidden><label for="l-tiers">Rack size</label>
+            <div class="row" style="gap:6px;flex-wrap:nowrap"><input id="l-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" placeholder="tiers" style="width:90px">
+              <span>tiers ×</span><input id="l-per" type="number" inputmode="numeric" min="1" max="8" step="1" placeholder="per tier" style="width:90px"></div>
+            <div class="hint">Tiers counting the floor position; pallets side by side on each tier.</div></div>
           <div class="field"><label for="l-sort">Sort order</label>
             <input id="l-sort" type="number" inputmode="numeric" value="${(locs.length + 1) * 10}"></div>
         </div>
         <button class="btn block" id="loc-save">Add Location</button>
       </form>
+      ${'rack_tiers' in (locs[0] || {}) ? `<div class="card sel-bar" id="sel-bar" hidden>
+        <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center"><strong id="sel-n"></strong>
+          <span>make them racking:</span><input id="sel-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" placeholder="tiers" style="width:80px">
+          <span>×</span><input id="sel-per" type="number" inputmode="numeric" min="1" max="8" step="1" placeholder="per tier" style="width:90px">
+          <button class="btn sm" id="sel-rack" type="button">Set Racking</button>
+          <button class="btn sm ghost" id="sel-floor" type="button">Make Floor Bays</button>
+          <button class="btn sm ghost" id="sel-clear" type="button">Clear</button></div>
+        <div class="hint">Tick bays below (any names), then set them all at once.</div></div>
+      <div class="row" style="justify-content:flex-end;margin:4px 0"><button class="btn sm ghost" id="sel-all" type="button">Select all shown</button></div>` : ''}
       ${locs.map(l => `
         <div class="list-item row spread" style="${l.active ? '' : 'opacity:.55'}">
-          <div><a href="#" class="title" data-loc="${l.id}">${esc(l.code)}</a>
-            <div class="meta">${esc(l.loc_type)}${l.zone ? ' &middot; ' + esc(l.zone) : ''}${isRack(l) ? ` &middot; rack ${l.rack_tiers} × ${l.rack_per_tier} = ${l.rack_tiers * l.rack_per_tier}` : l.capacity ? ' &middot; holds ' + l.capacity : ''}</div></div>
+          <div class="row" style="gap:10px;flex-wrap:nowrap">${'rack_tiers' in l && !['DOCK', 'FLOOR', 'HOLD'].includes(l.code) ? `<input type="checkbox" data-pick="${l.id}" aria-label="Select ${esc(l.code)}">` : ''}
+            <div><a href="#" class="title" data-loc="${l.id}">${esc(l.code)}</a>
+            <div class="meta">${esc(locTypeName(l.loc_type))}${l.zone ? ' &middot; ' + esc(l.zone) : ''}${isRack(l) ? ` &middot; ${l.rack_tiers} tiers × ${l.rack_per_tier} = ${l.rack_tiers * l.rack_per_tier} positions` : l.capacity ? ' &middot; holds ' + l.capacity : ''}</div></div></div>
           ${['DOCK', 'FLOOR', 'HOLD'].includes(l.code) ? '<span class="muted small">built-in</span>'
             : `<button class="btn sm ghost" data-toggle="${l.id}">${l.active ? 'Deactivate' : 'Activate'}</button>`}
         </div>`).join('')}`;
+    $('#l-type', out).onchange = e => { $('#l-rack', out).hidden = e.target.value !== 'rack'; };
     $('#loc-form', out).onsubmit = e => {
       e.preventDefault();
       busy($('#loc-save', out), async () => {
         const code = $('#l-code', out).value.trim().toUpperCase();
+        const type = $('#l-type', out).value, tiers = numOrNull($('#l-tiers', out).value), per = numOrNull($('#l-per', out).value);
+        if (type === 'rack' && !(tiers && per)) throw new Error('Enter the rack size: tiers (counting the floor) and pallets per tier.');
         await q(sb.from('locations').insert({
-          code, zone: strOrNull($('#l-zone', out).value), loc_type: $('#l-type', out).value,
+          code, zone: strOrNull($('#l-zone', out).value), loc_type: type,
+          ...(type === 'rack' ? { rack_tiers: Math.round(tiers), rack_per_tier: Math.round(per) } : {}),
           sort_order: Number($('#l-sort', out).value) || 0, warehouse_id: S.whId
         }));
         toast(`${code} added.`);
@@ -4791,7 +4812,7 @@
         if (rkPre) {
           const tiers = numOrNull($('#rk-tiers', out).value), per = numOrNull($('#rk-per', out).value);
           if (tiers && !per) throw new Error('How many pallets fit on each tier?');
-          const hit = await q(sb.from('locations').update({ rack_tiers: tiers ? Math.round(tiers) : null, rack_per_tier: tiers ? Math.round(per) : null })
+          const hit = await q(sb.from('locations').update({ loc_type: tiers ? 'rack' : 'storage', rack_tiers: tiers ? Math.round(tiers) : null, rack_per_tier: tiers ? Math.round(per) : null })
             .eq('warehouse_id', S.whId).ilike('code', rkPre + '%').select('id'));
           msg = tiers ? `${hit.length} ${rkPre} bay${hit.length === 1 ? '' : 's'} set as racks: ${Math.round(tiers)} tiers × ${Math.round(per)}.` : `${hit.length} ${rkPre} bays set back to floor bays.`;
         }
@@ -4803,27 +4824,46 @@
         toast(msg); viewSetup('locations');
       });
     });
+    const picked = () => $$('[data-pick]', out).filter(c => c.checked).map(c => c.dataset.pick);
+    const syncSel = () => { const n = picked().length; const bar = $('#sel-bar', out); if (bar) { bar.hidden = !n; $('#sel-n', out).textContent = `${n} selected`; } };
+    $$('[data-pick]', out).forEach(c => c.onchange = syncSel);
+    $('#sel-all', out)?.addEventListener('click', () => { const all = $$('[data-pick]', out); const on = all.some(c => !c.checked); all.forEach(c => { c.checked = on; }); syncSel(); });
+    $('#sel-clear', out)?.addEventListener('click', () => { $$('[data-pick]', out).forEach(c => { c.checked = false; }); syncSel(); });
+    $('#sel-rack', out)?.addEventListener('click', e => busy(e.target, async () => {
+      const tiers = numOrNull($('#sel-tiers', out).value), per = numOrNull($('#sel-per', out).value);
+      if (!(tiers && per)) throw new Error('Enter tiers (counting the floor) and pallets per tier.');
+      const ids = picked();
+      await q(sb.from('locations').update({ loc_type: 'rack', rack_tiers: Math.round(tiers), rack_per_tier: Math.round(per) }).in('id', ids));
+      toast(`${ids.length} location${ids.length === 1 ? '' : 's'} set to racking: ${Math.round(tiers)} tiers × ${Math.round(per)}.`); viewSetup('locations');
+    }));
+    $('#sel-floor', out)?.addEventListener('click', e => busy(e.target, async () => {
+      const ids = picked();
+      await q(sb.from('locations').update({ loc_type: 'storage', rack_tiers: null, rack_per_tier: null }).in('id', ids));
+      toast(`${ids.length} location${ids.length === 1 ? '' : 's'} set to floor bays.`); viewSetup('locations');
+    }));
     $$('[data-loc]', out).forEach(a => a.onclick = e => {
       e.preventDefault();
       const l = S.locations.find(x => x.id === a.dataset.loc);
       const body = openModal(`Location ${l.code}`, `<form id="lf">
         <div class="grid2">
           <div class="field"><label for="lf-cap">Holds <span class="muted small">(floor bay pallets, blank = default)</span></label><input id="lf-cap" type="number" inputmode="numeric" min="1" step="1" value="${esc(l.capacity ?? '')}"></div>
-          ${'rack_tiers' in l ? `<div class="field"><label for="lf-tiers">Rack tiers <span class="muted small">(counting floor; blank = not a rack)</span></label><input id="lf-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" value="${esc(l.rack_tiers ?? '')}"></div>
-          <div class="field"><label for="lf-per">Pallets per tier</label><input id="lf-per" type="number" inputmode="numeric" min="1" max="8" step="1" value="${esc(l.rack_per_tier ?? '')}"></div>` : ''}
+          ${'rack_tiers' in l ? `<div class="field lf-rack" ${isRack(l) ? '' : 'hidden'}><label for="lf-tiers">Rack tiers <span class="muted small">(counting the floor)</span></label><input id="lf-tiers" type="number" inputmode="numeric" min="1" max="12" step="1" value="${esc(l.rack_tiers ?? '')}"></div>
+          <div class="field lf-rack" ${isRack(l) ? '' : 'hidden'}><label for="lf-per">Pallets per tier</label><input id="lf-per" type="number" inputmode="numeric" min="1" max="8" step="1" value="${esc(l.rack_per_tier ?? '')}"></div>` : ''}
           <div class="field"><label for="lf-zone">Zone <span class="muted small">(groups the Bay Map)</span></label><input id="lf-zone" value="${esc(l.zone || '')}" maxlength="30"></div>
-          <div class="field"><label for="lf-type">Type</label><select id="lf-type">${['storage', 'floor', 'staging', 'dock', 'hold'].map(t => `<option ${l.loc_type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+          <div class="field"><label for="lf-type">Type</label><select id="lf-type">${LOC_TYPES.filter(([t]) => t !== 'rack' || 'rack_tiers' in l).map(([t, n]) => `<option value="${t}" ${l.loc_type === t || (t === 'rack' && isRack(l)) ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
           <div class="field"><label for="lf-sort">Sort order</label><input id="lf-sort" type="number" inputmode="numeric" value="${esc(l.sort_order ?? 0)}"></div>
         </div><button class="btn block" id="lf-save">Save</button></form>`);
+      $('#lf-type', body).onchange = ev => $$('.lf-rack', body).forEach(f => { f.hidden = ev.target.value !== 'rack'; });
       $('#lf', body).onsubmit = ev => {
         ev.preventDefault();
         busy($('#lf-save', body), async () => {
           const cap = numOrNull($('#lf-cap', body).value);
-          const tiers = $('#lf-tiers', body) ? numOrNull($('#lf-tiers', body).value) : undefined, per = $('#lf-per', body) ? numOrNull($('#lf-per', body).value) : undefined;
-          if (tiers && !per) throw new Error('How many pallets fit on each tier?');
-          await q(sb.from('locations').update({ ...(tiers !== undefined ? { rack_tiers: tiers ? Math.round(tiers) : null, rack_per_tier: tiers ? Math.round(per) : null } : {}),
+          const type = $('#lf-type', body).value, rackOk = !!$('#lf-tiers', body);
+          const tiers = rackOk ? numOrNull($('#lf-tiers', body).value) : null, per = rackOk ? numOrNull($('#lf-per', body).value) : null;
+          if (type === 'rack' && !(tiers && per)) throw new Error('Enter the rack size: tiers (counting the floor) and pallets per tier.');
+          await q(sb.from('locations').update({ ...(rackOk ? { rack_tiers: type === 'rack' ? Math.round(tiers) : null, rack_per_tier: type === 'rack' ? Math.round(per) : null } : {}),
             capacity: cap ? Math.round(cap) : null, zone: strOrNull($('#lf-zone', body).value),
-            loc_type: $('#lf-type', body).value, sort_order: Number($('#lf-sort', body).value) || 0 }).eq('id', l.id));
+            loc_type: type, sort_order: Number($('#lf-sort', body).value) || 0 }).eq('id', l.id));
           closeModal(); toast(`${l.code} saved.`); viewSetup('locations');
         });
       };
@@ -4989,9 +5029,10 @@
       label: 'Locations', note: () => `Adds locations to ${whById(S.whId).code || 'this warehouse'}. Switch warehouses in the header to load another building.`,
       cols: () => [
         ['code', 'Code', ['code', 'location', 'locationcode', 'bin', 'slot'], true], ['zone', 'Zone', ['zone', 'aisle', 'area']],
-        ['loc_type', 'Type (storage / floor / staging / dock / hold)', ['type', 'loctype', 'locationtype']], ['sort_order', 'Sort order', ['sort', 'sortorder', 'seq', 'order']]
+        ['loc_type', 'Type (storage / rack / floor / staging / dock / hold)', ['type', 'loctype', 'locationtype']], ['sort_order', 'Sort order', ['sort', 'sortorder', 'seq', 'order']],
+        ['rack_tiers', 'Rack tiers (counting floor)', ['racktiers', 'tiers', 'levels']], ['rack_per_tier', 'Pallets per tier', ['rackpertier', 'palletspertier', 'pertier', 'positions']]
       ],
-      example: () => ['A01-1', 'A', 'storage', '10']
+      example: () => ['MR121', 'MR', 'rack', '10', '4', '2']
     },
     opening: {
       label: 'Opening inventory', note: () => `Loads pallets already in ${whById(S.whId).code || 'the building'} on day one, without receiving each one. They keep their received date and are not billed as inbound. Import items first.`,
@@ -5158,8 +5199,11 @@
         const t = g('loc_type').toLowerCase();
         const sort = numCell(g('sort_order'));
         r.existing = whLocations().find(l => l.code.toUpperCase() === code) || S.locations.find(l => l.warehouse_id === S.whId && l.code.toUpperCase() === code);
-        r.data = { code, zone: strOrNull(g('zone')), loc_type: ['storage', 'floor', 'staging', 'dock', 'hold'].includes(t) ? t : 'storage',
-          sort_order: Number.isFinite(sort) ? sort : 0, warehouse_id: S.whId };
+        const type = t === 'racking' ? 'rack' : ['storage', 'rack', 'floor', 'staging', 'dock', 'hold'].includes(t) ? t : 'storage';
+        const tiers = numCell(g('rack_tiers')), per = numCell(g('rack_per_tier'));
+        if (type === 'rack' && !(tiers >= 1 && tiers <= 12 && per >= 1 && per <= 8)) err('Racking needs tiers (1-12) and pallets per tier (1-8)');
+        r.data = { code, zone: strOrNull(g('zone')), loc_type: type, sort_order: Number.isFinite(sort) ? sort : 0, warehouse_id: S.whId,
+          ...(idx.rack_tiers !== undefined || type === 'rack' ? { rack_tiers: type === 'rack' ? Math.round(tiers) : null, rack_per_tier: type === 'rack' ? Math.round(per) : null } : {}) };
         r.label = code;
       } else if (kind === 'opening' || kind === 'lwh') {
         if (kind === 'lwh' && /^(n|no|false|0)$/i.test(g('still'))) { r.skipReason = 'Not in inventory'; r.action = 'skip'; r.label = g('origin'); continue; }
