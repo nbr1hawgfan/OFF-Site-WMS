@@ -557,6 +557,8 @@
         if (b === 'unload' && c) return viewReceipt(c, null, true);
         if (b === 'unload') return viewDockReceipts();
         if (b === 'move') return viewDockMove();
+        if (b === 'batch') return viewDockBatch();
+        if (b === 'loadmove') return viewDockLoadMove(c);
         if (b === 'count' && c) return viewDockCount(c, d);
         if (b === 'count') return viewDockCounts();
         return viewDockHome();
@@ -1335,6 +1337,8 @@
         <div class="card">
           <div class="row spread"><h2 style="margin:0">Pallets</h2>
             <span class="muted">${active.length} pallet${active.length === 1 ? '' : 's'}${totalText}</span></div>
+          ${canDock() && !isCustomer() && active.some(p => ['on_hand', 'hold'].includes(p.status) && Number(p.qty_on_hand) > 0)
+            ? `<a class="btn sm secondary" style="margin-top:10px" href="#/dock/loadmove/${rcpt.id}">Move Whole Load to a Bay</a>` : ''}
           <div style="margin-top:12px">${pallets.length ? pallets.map(palletRow).join('') : '<p class="muted">No pallets yet.</p>'}</div>
         </div>
 
@@ -3054,6 +3058,8 @@
         <a class="dock-tile" href="#/dock/load"><strong>Load</strong><span>${ships} open load${ships === 1 ? '' : 's'}</span></a>
         <a class="dock-tile" href="#/dock/unload"><strong>Unload</strong><span>${rcpts} open receipt${rcpts === 1 ? '' : 's'}</span></a>
         <a class="dock-tile" href="#/dock/move"><strong>Move</strong><span>Put away / relocate</span></a>
+        <a class="dock-tile" href="#/dock/batch"><strong>Batch Move</strong><span>One bay, many scans</span></a>
+        <a class="dock-tile" href="#/dock/loadmove"><strong>Move Load</strong><span>Whole receipt to a bay</span></a>
         <a class="dock-tile" href="#/lookup"><strong>Lookup</strong><span>Find a pallet</span></a>
         <a class="dock-tile" href="#/dock/count"><strong>Count</strong><span>${counts ? `${counts} open count${counts === 1 ? '' : 's'}` : 'Cycle counts'}</span></a>
         <a class="dock-tile" href="#/schedule"><strong>Schedule</strong><span>Today's trucks</span></a>
@@ -3311,6 +3317,298 @@
           ? `${pallet.warehouse_code} ${pallet.location || '-'} → ${whById(loc.warehouse_id).code} ${loc.code} (transfer)`
           : `${pallet.location || '-'} → ${loc.code}`);
         viewDockMove();
+      });
+    };
+  }
+
+
+  /* ---------- batch move: scan the bay once, then pallet after pallet ---------- */
+  let batchMv = null;   // { whId, toId, fromId, moved: [] } kept while you work, across re-renders
+  const locByCode = (whId, code) => {
+    const c = String(code || '').trim().toUpperCase();
+    return c ? whLocations(whId).find(l => l.code.toUpperCase() === c) || null : null;
+  };
+  const locDatalist = (id, whId = S.whId) => `<datalist id="${id}">${whLocations(whId).map(l => `<option value="${esc(l.code)}"></option>`).join('')}</datalist>`;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+  async function viewDockBatch() {
+    if (batchMv && batchMv.whId !== S.whId) batchMv = null;
+    if (!batchMv || !batchMv.toId) return batchSetup();
+    return batchScan();
+  }
+
+  function batchSetup() {
+    const fromCode = batchMv?.fromId ? locById(batchMv.fromId).code : '';
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Batch Move</h1>
+      <p class="muted" style="margin-top:-6px">Scan the bay once, then scan pallets one after another. Each pallet moves the moment it's scanned.</p>
+      <form id="bm-setup" class="card accent" autocomplete="off">
+        <label for="bm-to">Move into: scan or pick the bay</label>
+        <div class="input-scan"><input id="bm-to" class="big-input" list="bm-locs" enterkeyhint="go" autocapitalize="characters">${scanBtn('bm-to', 'bm-setup')}</div>
+        <details class="more" ${fromCode ? 'open' : ''}><summary>Consolidating? Only take from one bay</summary>
+          <div class="field" style="margin-top:8px"><label for="bm-from">Only accept pallets from</label>
+            <div class="input-scan"><input id="bm-from" list="bm-locs" autocapitalize="characters" value="${esc(fromCode)}">${scanBtn('bm-from')}</div>
+            <div class="hint">Pallets scanned from any other bay are rejected, so a stray scan can't move the wrong pallet. You also get a "move everything left" button.</div></div>
+        </details>
+        <button class="btn block" id="bm-start" style="margin-top:12px">Start Scanning</button>
+      </form>
+      ${locDatalist('bm-locs')}`);
+    const form = $('#bm-setup');
+    wireScanButtons(form);
+    setTimeout(() => $('#bm-to')?.focus(), 50);
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy($('#bm-start'), async () => {
+        const to = locByCode(S.whId, $('#bm-to').value);
+        if (!to) throw new Error(`Bay ${$('#bm-to').value.trim() || '(blank)'} not found in ${whById(S.whId).code || 'this warehouse'}.`);
+        const fromTxt = $('#bm-from').value.trim();
+        const from = fromTxt ? locByCode(S.whId, fromTxt) : null;
+        if (fromTxt && !from) throw new Error(`Bay ${fromTxt} not found.`);
+        if (from && from.id === to.id) throw new Error('The "from" bay and the "into" bay are the same.');
+        batchMv = { whId: S.whId, toId: to.id, fromId: from?.id || null, moved: [] };
+        dockFlash = null;
+        await batchScan();
+      });
+    };
+  }
+
+  async function batchScan() {
+    const mySeq = navSeq;
+    const st = batchMv, to = locById(st.toId), from = st.fromId ? locById(st.fromId) : null;
+    let left = [];
+    if (from) {
+      left = await q(sb.from('pallets').select('id, lp_id, item_id, lot_number, qty_on_hand')
+        .eq('location_id', from.id).in('status', ['on_hand', 'hold']).gt('qty_on_hand', 0).order('lp_id').limit(2000));
+      if (mySeq !== navSeq) return;
+    }
+    const n = st.moved.length;
+    render(`
+      <div id="bm-page">
+        <a class="back" href="#/dock">&larr; Dock</a>
+        <div class="dock-head">
+          <div class="dock-head-main">Into ${esc(to.code)}</div>
+          <div>${from ? `Only from <strong>${esc(from.code)}</strong>` : 'From any bay'} &middot; <strong>${plural(n, 'pallet')}</strong> moved</div>
+        </div>
+        <form id="bm-scan" class="card accent" autocomplete="off">
+          <label for="bm-p">Scan pallet</label>
+          <input id="bm-p" class="big-input" enterkeyhint="go" autocomplete="off">
+          <div class="row" style="margin-top:8px">${scanBtn('bm-p', 'bm-scan')}<button class="btn" id="bm-btn">Move</button></div>
+        </form>
+        ${flashHtml()}
+        ${from ? `<div class="card">
+          <div class="row spread"><h2 style="margin:0">Still in ${esc(from.code)}</h2><span class="muted">${plural(left.length, 'pallet')}</span></div>
+          ${left.length ? `<p class="muted small" style="margin:6px 0 10px">${left.slice(0, 12).map(p => esc(p.lp_id)).join(', ')}${left.length > 12 ? ` and ${left.length - 12} more` : ''}</p>
+            <button class="btn secondary block" id="bm-all">Move all ${left.length} left in ${esc(from.code)} &rarr; ${esc(to.code)}</button>`
+            : `<p class="muted" style="margin:6px 0 0">${esc(from.code)} is empty.</p>`}
+        </div>` : ''}
+        <div class="card">
+          <div class="row spread"><h2 style="margin:0">Moved into ${esc(to.code)}</h2><span class="muted">${plural(n, 'pallet')}</span></div>
+          <div style="margin-top:10px">${st.moved.map((m, i) => `
+            <div class="list-item pallet">
+              <div><div class="lp">${esc(m.lp_id)}</div>
+                <div><strong>${esc(m.sku || '')}</strong>${m.lot_number ? ' &middot; ' + esc(m.lot_number) : ''}</div>
+                <div class="meta">${esc(m.fromCode || '-')} &rarr; ${esc(to.code)}</div></div>
+              <div class="qty">${esc(fmtQty(m.qty))}<div class="meta">${esc(m.uom || '')}</div></div>
+              <div class="row" style="grid-column:1/-1"><button class="btn sm ghost" data-undo="${i}">Undo</button></div>
+            </div>`).join('') || '<p class="muted">Nothing moved yet. Scan the first pallet.</p>'}</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn secondary" id="bm-change">Change Bay</button>
+          <button class="btn" id="bm-done">Finish</button>
+        </div>
+      </div>`);
+    const page = $('#bm-page');
+    wireScanButtons(page);
+    const input = $('#bm-p', page);
+    setTimeout(() => input.focus(), 30);
+
+    $('#bm-scan', page).onsubmit = e => {
+      e.preventDefault();
+      const code = input.value.trim();
+      if (!code) return;
+      busy($('#bm-btn', page), async () => {
+        try {
+          const found = await q(sb.rpc('wms_find_pallet', { p_code: code }));
+          if (!found.length) throw new Error(`No pallet in stock matches ${code}.`);
+          if (found.length > 1) throw new Error(`${code} matches ${found.length} pallets. Scan the WMS pallet ID.`);
+          const p = found[0];
+          if (p.location_id === to.id) flash('warn', `ALREADY IN ${to.code}`, `${p.lp_id} · ${p.sku}`);
+          else if (p.warehouse_id && p.warehouse_id !== st.whId) flash('bad', 'OTHER WAREHOUSE', `${p.lp_id} is in ${locLabel(p.location_id) || p.location || '-'}. Use Move to transfer between warehouses. Not moved.`);
+          else if (from && p.location_id !== from.id) flash('bad', 'WRONG BAY', `${p.lp_id} is in ${locLabel(p.location_id) || p.location || '-'}, not ${from.code}. Not moved.`);
+          else {
+            const r = await q(sb.rpc('wms_move_pallets', { p_pallet_ids: [p.pallet_id], p_to_location_id: to.id, p_reason: 'Batch move' }));
+            if (!r.moved) throw new Error(r.skipped?.[0] ? `${p.lp_id}: ${r.skipped[0].why}` : `${p.lp_id} was not moved.`);
+            st.moved.unshift({ pallet_id: p.pallet_id, lp_id: p.lp_id, sku: p.sku, lot_number: p.lot_number, qty: p.qty_on_hand, uom: p.uom,
+              fromId: p.location_id, fromCode: locLabel(p.location_id) || p.location });
+            flash('ok', `MOVED ${p.lp_id}`, `${locLabel(p.location_id) || p.location || '-'} → ${to.code} · ${plural(st.moved.length, 'pallet')} moved`);
+          }
+        } catch (err) { flash('bad', 'NOT MOVED', friendly(err)); }
+        if (batchMv === st) await batchScan();
+      });
+    };
+
+    $('#bm-all', page)?.addEventListener('click', async () => {
+      if (!await askConfirm(`Move all ${left.length} pallets?`, `Everything still in ${esc(from.code)} goes to ${esc(to.code)}.`, 'Move All')) return;
+      busy($('#bm-all'), async () => {
+        const r = await q(sb.rpc('wms_move_pallets', { p_pallet_ids: left.map(p => p.id), p_to_location_id: to.id, p_reason: `Batch move (all of ${from.code})` }));
+        const skipped = new Set((r.skipped || []).map(s => s.lp_id));
+        left.filter(p => !skipped.has(p.lp_id)).forEach(p => {
+          const it = itemById(p.item_id);
+          st.moved.unshift({ pallet_id: p.id, lp_id: p.lp_id, sku: it.sku, lot_number: p.lot_number, qty: p.qty_on_hand, uom: it.uom, fromId: from.id, fromCode: from.code });
+        });
+        flash(r.skipped?.length ? 'warn' : 'ok', `MOVED ${r.moved}`, `${from.code} → ${to.code}${r.skipped?.length ? ` · ${r.skipped.length} skipped: ${r.skipped.map(s => s.lp_id + ' ' + s.why).join('; ')}` : ''}`);
+        await batchScan();
+      });
+    });
+
+    $$('[data-undo]', page).forEach(b => b.onclick = () => {
+      const m = st.moved[Number(b.dataset.undo)];
+      busy(b, async () => {
+        const r = await q(sb.rpc('wms_move_pallets', { p_pallet_ids: [m.pallet_id], p_to_location_id: m.fromId, p_reason: 'Batch move undone' }));
+        if (!r.moved && !r.already_there) throw new Error(r.skipped?.[0] ? `${m.lp_id}: ${r.skipped[0].why}` : `${m.lp_id} could not be moved back.`);
+        st.moved.splice(st.moved.indexOf(m), 1);
+        flash('ok', `UNDONE ${m.lp_id}`, `Back in ${m.fromCode || '-'}`);
+        await batchScan();
+      });
+    });
+
+    $('#bm-change', page).onclick = () => { st.toId = null; st.moved = []; dockFlash = null; batchSetup(); };
+    $('#bm-done', page).onclick = () => {
+      batchMv = null; dockFlash = null;
+      if (n) toast(`${plural(n, 'pallet')} moved into ${to.code}.`);
+      location.hash = '#/dock';
+    };
+  }
+
+  /* ---------- move a whole load (receipt) to one bay ---------- */
+  async function viewDockLoadMove(rid) {
+    if (rid) return loadMovePage(rid);
+    const mySeq = navSeq;
+    render(`<div class="loading">Loading...</div>`);
+    const since = new Date(Date.now() - 45 * 864e5).toISOString();
+    const recent = await q(sb.from('receipts').select('id, receipt_no, status, received_at, vendor_name, inbound_bol, po_number, owner_id')
+      .eq('warehouse_id', S.whId).neq('status', 'void').gte('received_at', since).order('received_at', { ascending: false }).limit(12));
+    if (mySeq !== navSeq) return;
+    render(`
+      <a class="back" href="#/dock">&larr; Dock</a>
+      <h1>Move Whole Load</h1>
+      <form id="lm-find" class="card accent" autocomplete="off">
+        <label for="lm-code">Scan or type the receipt #, inbound BOL or PO</label>
+        <div class="input-scan"><input id="lm-code" class="big-input" enterkeyhint="go" placeholder="RCV-1001">${scanBtn('lm-code', 'lm-find')}</div>
+        <div id="lm-hits"></div>
+      </form>
+      <h2>Recent loads</h2>
+      ${recent.length ? recent.map(r => `
+        <a class="list-item dock-item" href="#/dock/loadmove/${r.id}">
+          <div class="row spread"><span class="title">${esc(r.receipt_no)}</span>${badge(r.status)}</div>
+          <div class="meta">${esc([r.vendor_name, multiOwner() && ownerById(r.owner_id).code, fmtDate(r.received_at)].filter(Boolean).join(' · '))}</div>
+          ${r.inbound_bol || r.po_number ? `<div class="meta">${esc([r.inbound_bol && 'BOL ' + r.inbound_bol, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>` : ''}
+        </a>`).join('') : '<p class="muted">No receipts in the last 45 days.</p>'}`);
+    const form = $('#lm-find');
+    wireScanButtons(form);
+    setTimeout(() => $('#lm-code')?.focus(), 50);
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy(null, async () => {
+        const raw = $('#lm-code').value.trim();
+        const safe = raw.replace(/[,()*%\\]/g, ' ').trim();
+        if (!safe) return;
+        const terms = [safe];
+        if (/^\d+$/.test(safe)) terms.push('RCV-' + safe);
+        const ors = terms.flatMap(t => [`receipt_no.ilike.${t}`, `inbound_bol.ilike.${t}`, `po_number.ilike.${t}`]);
+        const hits = await q(sb.from('receipts').select('id, receipt_no, status, received_at, vendor_name, inbound_bol, po_number, warehouse_id, owner_id')
+          .or(ors.join(',')).neq('status', 'void').order('received_at', { ascending: false }).limit(20));
+        if (!hits.length) throw new Error(`No receipt found for ${raw}.`);
+        if (hits.length === 1) { location.hash = '#/dock/loadmove/' + hits[0].id; return; }
+        $('#lm-hits').innerHTML = `<p class="muted small" style="margin:10px 0 6px">${hits.length} loads match. Pick one:</p>` + hits.map(r => `
+          <a class="list-item dock-item" href="#/dock/loadmove/${r.id}">
+            <div class="row spread"><span class="title">${esc(r.receipt_no)}</span>${badge(r.status)}</div>
+            <div class="meta">${esc([r.vendor_name, multiWh() && whById(r.warehouse_id).code, multiOwner() && ownerById(r.owner_id).code, fmtDate(r.received_at)].filter(Boolean).join(' · '))}</div>
+            <div class="meta">${esc([r.inbound_bol && 'BOL ' + r.inbound_bol, r.po_number && 'PO ' + r.po_number].filter(Boolean).join(' · '))}</div>
+          </a>`).join('');
+      });
+    };
+  }
+
+  async function loadMovePage(rid) {
+    const mySeq = navSeq;
+    if (!document.querySelector('#lm-page')) render(`<div class="loading">Loading...</div>`);
+    const [rcpt, pals] = await Promise.all([
+      q(sb.from('receipts').select('id, receipt_no, status, received_at, vendor_name, inbound_bol, po_number, warehouse_id, owner_id').eq('id', rid).single()),
+      q(sb.from('pallets').select('id, lp_id, item_id, lot_number, qty_on_hand, status, location_id').eq('receipt_id', rid).neq('status', 'void').order('lp_id'))
+    ]);
+    if (mySeq !== navSeq) return;
+    const inStock = pals.filter(p => ['on_hand', 'hold'].includes(p.status) && Number(p.qty_on_hand) > 0);
+    const gone = pals.length - inStock.length;
+    const groups = {};
+    inStock.forEach(p => { (groups[p.location_id] = groups[p.location_id] || []).push(p); });
+    const locIds = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
+    const onHold = inStock.filter(p => p.status === 'hold');
+    const whId = rcpt.warehouse_id;
+    const back = isLift() ? '#/dock/loadmove' : '#/receipt/' + rid;
+    render(`
+      <div id="lm-page">
+        <a class="back" href="${back}">&larr; ${isLift() ? 'Find load' : rcpt.receipt_no}</a>
+        <div class="dock-head">
+          <div class="dock-head-main">${esc(rcpt.receipt_no)}</div>
+          <div>${esc([rcpt.vendor_name, multiOwner() && ownerById(rcpt.owner_id).code, fmtDate(rcpt.received_at)].filter(Boolean).join(' · '))}</div>
+          <div class="muted small">${esc([rcpt.inbound_bol && 'BOL ' + rcpt.inbound_bol, rcpt.po_number && 'PO ' + rcpt.po_number].filter(Boolean).join(' · '))}</div>
+        </div>
+        ${flashHtml()}
+        ${!inStock.length ? `<div class="notice">Nothing from this load is in stock${gone ? ` (${plural(gone, 'pallet')} already shipped)` : ''}.</div>` : `
+        <form id="lm-form" class="card accent" autocomplete="off">
+          <h2>${plural(inStock.length, 'pallet')} in stock</h2>
+          ${gone ? `<p class="muted small" style="margin-top:-6px">${plural(gone, 'pallet')} from this load already shipped.</p>` : ''}
+          <div class="field"><label>Move pallets now in</label>
+            ${locIds.map(l => `<label class="check" style="display:flex;margin:6px 0"><input type="checkbox" data-from="${l}" checked>
+              <strong style="margin:0 6px">${esc(locLabel(l) || '-')}</strong> <span class="muted">${plural(groups[l].length, 'pallet')}</span></label>`).join('')}
+            ${locIds.length > 1 ? '<div class="hint">Untick a bay to leave those pallets where they are (e.g. already put away).</div>' : ''}</div>
+          <label for="lm-to">Move into: scan or pick the bay</label>
+          <div class="input-scan"><input id="lm-to" class="big-input" list="lm-locs" enterkeyhint="go" autocapitalize="characters">${scanBtn('lm-to', 'lm-form')}</div>
+          ${locDatalist('lm-locs', whId)}
+          ${onHold.length ? (can('manager')
+            ? `<label class="check" style="margin-top:10px"><input type="checkbox" id="lm-release"> Also release the hold on ${plural(onHold.length, 'pallet')}</label>`
+            : `<div class="notice warn" style="margin-top:10px">${plural(onHold.length, 'pallet')} on hold. They move, but stay on hold until a manager releases them.</div>`) : ''}
+          <button class="btn block" id="lm-btn" style="margin-top:12px">Move ${plural(inStock.length, 'Pallet')}</button>
+        </form>`}
+        ${inStock.length ? `<div class="card"><h2>Pallets</h2>${inStock.map(p => {
+          const it = itemById(p.item_id);
+          return `<div class="list-item pallet"><div><div class="lp">${esc(p.lp_id)} ${p.status !== 'on_hand' ? badge(p.status) : ''}</div>
+            <div><strong>${esc(it.sku || '')}</strong>${p.lot_number ? ' &middot; ' + esc(p.lot_number) : ''}</div>
+            <div class="meta">${esc(locLabel(p.location_id) || '-')}</div></div>
+            <div class="qty">${esc(fmtQty(p.qty_on_hand))}<div class="meta">${esc(it.uom || '')}</div></div></div>`;
+        }).join('')}</div>` : ''}
+      </div>`);
+    const form = $('#lm-form');
+    if (!form) return;
+    wireScanButtons(form);
+    setTimeout(() => $('#lm-to')?.focus(), 50);
+    const picked = () => $$('[data-from]', form).filter(c => c.checked).flatMap(c => groups[c.dataset.from]);
+    const btn = $('#lm-btn', form);
+    $$('[data-from]', form).forEach(c => c.onchange = () => { btn.textContent = `Move ${plural(picked().length, 'Pallet')}`; });
+    form.onsubmit = e => {
+      e.preventDefault();
+      busy(btn, async () => {
+        const to = locByCode(whId, $('#lm-to').value);
+        if (!to) throw new Error(`Bay ${$('#lm-to').value.trim() || '(blank)'} not found${multiWh() ? ' in ' + whById(whId).code : ''}.`);
+        const list = picked();
+        if (!list.length) throw new Error('Tick at least one bay to move from.');
+        const release = $('#lm-release', form)?.checked;
+        if (!await askConfirm(`Move ${plural(list.length, 'pallet')} to ${esc(to.code)}?`,
+          `Everything ticked from ${esc(rcpt.receipt_no)} goes to ${esc(to.code)}${release ? ' and comes off hold' : ''}.`, 'Move')) return;
+        const r = await q(sb.rpc('wms_move_pallets', { p_pallet_ids: list.map(p => p.id), p_to_location_id: to.id, p_reason: `Load ${rcpt.receipt_no} moved` }));
+        let released = 0;
+        if (release) {
+          for (const p of list.filter(x => x.status === 'hold')) {
+            await q(sb.rpc('wms_set_hold', { p_pallet_id: p.id, p_hold: false, p_reason: `Cleared; load ${rcpt.receipt_no} moved to ${to.code}` }));
+            released++;
+          }
+        }
+        const skipped = r.skipped || [];
+        flash(skipped.length ? 'warn' : 'ok', `MOVED ${plural(r.moved, 'pallet').toUpperCase()}`,
+          `${rcpt.receipt_no} → ${to.code}${r.already_there ? ` · ${r.already_there} already there` : ''}${released ? ` · ${released} released from hold` : ''}${skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.lp_id + ' ' + s.why).join('; ')}` : ''}`);
+        await loadMovePage(rid);
       });
     };
   }
